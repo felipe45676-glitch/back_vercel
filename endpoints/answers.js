@@ -1040,25 +1040,21 @@ router.get("/data-approved/:responseId", async (req, res) => {
   }
 });
 
-router.get("/download-approved-pdf/:responseId", async (req, res) => {
+router.post("/download-approved-pdf", async (req, res) => {
   try {
-    console.log("Debug: Solicitando descarga de PDF aprobado para responseId:", req.params.responseId);
+    const { responseId } = req.body;
 
     const approvedDoc = await req.db.collection("aprobados").findOne({
-      responseId: req.params.responseId
+      responseId: responseId
     });
 
     if (!approvedDoc) {
-      console.log("Debug: No se encontró documento aprobado para responseId:", req.params.responseId);
       return res.status(404).json({ error: "Documento aprobado no encontrado" });
     }
 
     if (!approvedDoc.correctedFile || !approvedDoc.correctedFile.fileData) {
-      console.log("Debug: No hay archivo PDF en el documento aprobado");
       return res.status(404).json({ error: "Archivo PDF no disponible" });
     }
-
-    console.log("Debug: Enviando PDF:", approvedDoc.correctedFile.fileName);
 
     res.setHeader('Content-Type', approvedDoc.correctedFile.mimeType || 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${approvedDoc.correctedFile.fileName}"`);

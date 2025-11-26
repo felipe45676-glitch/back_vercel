@@ -216,8 +216,8 @@ router.post("/:id/adjuntos", async (req, res) => {
     console.log(`Subiendo adjunto ${index + 1} de ${total} para respuesta:`, id);
 
     if (!adjunto || typeof index === 'undefined' || !total) {
-      return res.status(400).json({ 
-        error: "Faltan campos: adjunto, index o total" 
+      return res.status(400).json({
+        error: "Faltan campos: adjunto, index o total"
       });
     }
 
@@ -279,7 +279,7 @@ router.post("/:id/adjuntos", async (req, res) => {
 
   } catch (error) {
     console.error('Error subiendo adjunto individual:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       error: `Error subiendo adjunto: ${error.message}`
     });
   }
@@ -310,7 +310,7 @@ router.get("/:id/adjuntos/:index", async (req, res) => {
 
     // CORRECCIÓN: Verificar la estructura real de tus datos
     let archivoAdjunto;
-    
+
     if (documentoAdjunto.adjuntos && documentoAdjunto.adjuntos.length > 0) {
       // Si usas la nueva estructura con array 'adjuntos'
       archivoAdjunto = documentoAdjunto.adjuntos[parseInt(index)];
@@ -384,11 +384,11 @@ router.get("/mail/:mail", async (req, res) => {
     const answersProcessed = answers.map(answer => {
       // Buscar el nombre del trabajador en diferentes formatos
       let trabajador = "No especificado";
-      
+
       if (answer.responses) {
-        trabajador = answer.responses["Nombre del trabajador"] || 
-                    answer.responses["NOMBRE DEL TRABAJADOR"] || 
-                    answer.responses["nombre del trabajador"]
+        trabajador = answer.responses["Nombre del trabajador"] ||
+          answer.responses["NOMBRE DEL TRABAJADOR"] ||
+          answer.responses["nombre del trabajador"]
       }
 
       return {
@@ -433,25 +433,25 @@ router.get("/mini", async (req, res) => {
     const answersProcessed = answers.map(answer => {
       // Buscar el nombre del trabajador en diferentes formatos
       let trabajador = "No especificado";
-      
+
       if (answer.responses) {
-        trabajador = answer.responses["Nombre del trabajador"] || 
-                    answer.responses["NOMBRE DEL TRABAJADOR"] || 
-                    answer.responses["nombre del trabajador"] || 
-                    answer.responses["Nombre del Trabajador"] ||
-                    answer.responses["Nombre Del trabajador "] ||
-                    "No especificado";
+        trabajador = answer.responses["Nombre del trabajador"] ||
+          answer.responses["NOMBRE DEL TRABAJADOR"] ||
+          answer.responses["nombre del trabajador"] ||
+          answer.responses["Nombre del Trabajador"] ||
+          answer.responses["Nombre Del trabajador "] ||
+          "No especificado";
       }
 
       let rutTrabajador = "No especificado";
 
       if (answer.responses) {
         rutTrabajador = answer.responses["RUT del trabajador"] ||
-                        answer.responses["RUT DEL TRABAJADOR"] || 
-                        answer.responses["rut del trabajador"] || 
-                        answer.responses["Rut del Trabajador"] ||
-                        answer.responses["Rut Del trabajador "] ||
-                        "No especificado";
+          answer.responses["RUT DEL TRABAJADOR"] ||
+          answer.responses["rut del trabajador"] ||
+          answer.responses["Rut del Trabajador"] ||
+          answer.responses["Rut Del trabajador "] ||
+          "No especificado";
       }
 
       return {
@@ -742,8 +742,8 @@ router.get("/:id/finalized", async (req, res) => {
       return res.status(400).json({ error: "ID de respuesta inválido" });
     }
 
-    const respuesta = await req.db.collection("respuestas").findOne({ 
-      _id: new ObjectId(id) 
+    const respuesta = await req.db.collection("respuestas").findOne({
+      _id: new ObjectId(id)
     });
 
     if (!respuesta) {
@@ -791,8 +791,8 @@ router.get("/:id/archived", async (req, res) => {
       return res.status(400).json({ error: "ID de respuesta inválido" });
     }
 
-    const respuesta = await req.db.collection("respuestas").findOne({ 
-      _id: new ObjectId(id) 
+    const respuesta = await req.db.collection("respuestas").findOne({
+      _id: new ObjectId(id)
     });
 
     if (!respuesta) {
@@ -1041,7 +1041,7 @@ router.get("/data-approved/:responseId", async (req, res) => {
 
 router.get("/download-approved-pdf/:responseId", async (req, res) => {
   try {
-    console.log("Debug: Solicitando descarga de PDF aprobado para responseId:", req.params.responseId);
+    console.log("🔍 DEBUG - Solicitando descarga de PDF aprobado para responseId:", req.params.responseId);
 
     const approvedDoc = await req.db.collection("aprobados").findOne({
       responseId: req.params.responseId
@@ -1057,11 +1057,18 @@ router.get("/download-approved-pdf/:responseId", async (req, res) => {
       return res.status(404).json({ error: "Archivo PDF no disponible" });
     }
 
-    console.log("Debug: Enviando PDF:", approvedDoc.correctedFile.fileName);
+    console.log("🔍 DEBUG - Nombre real del archivo en BD:", approvedDoc.correctedFile.fileName);
 
+    // 🔧 HEADERS CORS CRÍTICOS
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition, Content-Length, Content-Type');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+
+    // Headers normales
     res.setHeader('Content-Type', approvedDoc.correctedFile.mimeType || 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename="${approvedDoc.correctedFile.fileName}"`);
     res.setHeader('Content-Length', approvedDoc.correctedFile.fileSize);
+
+    console.log("🔍 DEBUG - Headers configurados, enviando archivo...");
 
     res.send(approvedDoc.correctedFile.fileData.buffer || approvedDoc.correctedFile.fileData);
 

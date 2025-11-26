@@ -564,7 +564,7 @@ router.delete("/:id", async (req, res) => {
 });
 
 //solicitar de mensajes
-router.get("/:formId/chat", async (req, res) => {
+router.get("/:formId/chat/admin", async (req, res) => {
   try {
     const { formId } = req.params;
 
@@ -587,6 +587,38 @@ router.get("/:formId/chat", async (req, res) => {
   } catch (err) {
     console.error("Error obteniendo chat:", err);
     res.status(500).json({ error: "Error al obtener chat" });
+  }
+});
+
+router.get("/:formId/chat/", async (req, res) => {
+  try {
+    const { formId } = req.params;
+
+    let query;
+    if (ObjectId.isValid(formId)) {
+      query = { $or: [{ _id: new ObjectId(formId) }, { formId }] };
+    } else {
+      query = { formId };
+    }
+
+    // Obtenemos todos los mensajes primero
+    const respuesta = await req.db
+      .collection("respuestas")
+      .findOne(query, { projection: { mensajes: 1 } });
+
+    if (!respuesta) {
+      return res.status(404).json({ error: "No se encontró la respuesta con ese formId o _id" });
+    }
+
+    const todosLosMensajes = respuesta.mensajes || [];
+
+    const mensajesGenerales = todosLosMensajes.filter(msg => !msg.admin);
+
+    res.json(mensajesGenerales);
+
+  } catch (err) {
+    console.error("Error obteniendo chat general:", err);
+    res.status(500).json({ error: "Error al obtener chat general" });
   }
 });
 
@@ -1040,12 +1072,10 @@ router.get("/data-approved/:responseId", async (req, res) => {
   }
 });
 
-router.post("/download-approved-pdf", async (req, res) => {
+router.get("/download-approved-pdf/:responseId", async (req, res) => {
   try {
-    const { responseId } = req.body;
-
     const approvedDoc = await req.db.collection("aprobados").findOne({
-      responseId: responseId
+      responseId: req.params.responseId
     });
 
     if (!approvedDoc) {
@@ -1056,8 +1086,10 @@ router.post("/download-approved-pdf", async (req, res) => {
       return res.status(404).json({ error: "Archivo PDF no disponible" });
     }
 
+    // Pasar filename explícitamente como query parameter
+    const fileName = approvedDoc.correctedFile.fileName;
+
     res.setHeader('Content-Type', approvedDoc.correctedFile.mimeType || 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${approvedDoc.correctedFile.fileName}"`);
     res.setHeader('Content-Length', approvedDoc.correctedFile.fileSize);
 
     res.send(approvedDoc.correctedFile.fileData.buffer || approvedDoc.correctedFile.fileData);

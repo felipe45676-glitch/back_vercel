@@ -9,6 +9,7 @@ const { validarToken } = require("../utils/validarToken.js");
 
 
 // Función para normalizar nombres de archivos (versión mejorada)
+// Función para normalizar nombres de archivos (versión corregida)
 const normalizeFilename = (filename) => {
   if (!filename) return 'documento_sin_nombre.pdf';
 
@@ -16,7 +17,7 @@ const normalizeFilename = (filename) => {
   const nameWithoutExt = filename.substring(0, filename.lastIndexOf('.')) || 'documento_sin_nombre';
 
   const normalized = nameWithoutExt
-    .normalize('NFD')
+    // Primero reemplazar caracteres especiales del español
     .replace(/ñ/g, 'n')
     .replace(/Ñ/g, 'N')
     .replace(/á/g, 'a')
@@ -29,12 +30,15 @@ const normalizeFilename = (filename) => {
     .replace(/Í/g, 'I')
     .replace(/Ó/g, 'O')
     .replace(/Ú/g, 'U')
-    .replace(/ü/g, 'u')
-    .replace(/Ü/g, 'U')
-    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/ü/g, 'u')  // ü se convierte en u
+    .replace(/Ü/g, 'U')  // Ü se convierte en U
+    // Eliminar caracteres especiales restantes (solo permitir letras, números, espacios, guiones, puntos)
     .replace(/[^a-zA-Z0-9\s._-]/g, '')
+    // Reemplazar espacios múltiples por un solo guión bajo
     .replace(/\s+/g, '_')
+    // Limitar longitud
     .substring(0, 100)
+    // Eliminar guiones bajos al inicio/final
     .replace(/^_+|_+$/g, '');
 
   if (!normalized || normalized.length === 0) {

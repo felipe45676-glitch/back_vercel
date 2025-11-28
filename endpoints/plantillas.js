@@ -17,11 +17,14 @@ router.post("/", async (req, res) => {
 
     if (!data.id) {
       // 1. CREACIÓN: Insertar nueva plantilla
-      result = await req.db.collection("plantillas").insertOne({
+      const plantillaToInsert = {
         ...req.body,
+        id: newPlantillaId.toString(),  // ← GUARDAR EN LA BD
         createdAt: new Date(),
         updatedAt: new Date(),
-      });
+      };
+
+      result = await req.db.collection("plantillas").insertOne(plantillaToInsert);
       const newPlantillaId = result.insertedId;
 
       // 2. VINCULACIÓN CRÍTICA: Actualizar el formulario con el ID de la plantilla
@@ -30,11 +33,7 @@ router.post("/", async (req, res) => {
         { $set: { plantillaId: newPlantillaId } }
       );
 
-      res.status(201).json({
-        ...req.body,
-        _id: newPlantillaId,
-        id: newPlantillaId.toString()
-      });
+      res.status(201).json(plantillaToInsert);  // ← Ya incluye id y _id
 
     } else {
       // 1. ACTUALIZACIÓN (PUT): Actualizar la plantilla existente

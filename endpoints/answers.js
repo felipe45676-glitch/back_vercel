@@ -8,7 +8,6 @@ const { enviarCorreoRespaldo } = require("../utils/mailrespaldo.helper");
 const { validarToken } = require("../utils/validarToken.js");
 
 
-// Función para normalizar nombres de archivos
 // Función para normalizar nombres de archivos (versión mejorada)
 const normalizeFilename = (filename) => {
   if (!filename) return 'documento_sin_nombre.pdf';
@@ -18,7 +17,6 @@ const normalizeFilename = (filename) => {
 
   const normalized = nameWithoutExt
     .normalize('NFD')
-    // Reemplazar caracteres especiales del español
     .replace(/ñ/g, 'n')
     .replace(/Ñ/g, 'N')
     .replace(/á/g, 'a')
@@ -33,18 +31,12 @@ const normalizeFilename = (filename) => {
     .replace(/Ú/g, 'U')
     .replace(/ü/g, 'u')
     .replace(/Ü/g, 'U')
-    // Eliminar cualquier otro diacrítico
     .replace(/[\u0300-\u036f]/g, '')
-    // Eliminar caracteres especiales restantes
     .replace(/[^a-zA-Z0-9\s._-]/g, '')
-    // Reemplazar espacios múltiples por un solo guión bajo
     .replace(/\s+/g, '_')
-    // Limitar longitud
     .substring(0, 100)
-    // Eliminar guiones bajos al inicio/final
     .replace(/^_+|_+$/g, '');
 
-  // Si después de normalizar queda vacío, usar nombre por defecto
   if (!normalized || normalized.length === 0) {
     return `documento_${Date.now()}.${extension}`;
   }
@@ -110,21 +102,20 @@ router.post("/", async (req, res) => {
       mail: correoRespaldo,
       status: "pendiente",
       createdAt: new Date()
-      // SIN adjuntosCount - solo los campos básicos
     });
 
-    console.log("✅ Respuesta principal guardada con ID:", result.insertedId);
+    console.log("Respuesta principal guardada con ID:", result.insertedId);
 
     // Crear documento para adjuntos con el formato específico
     if (adjuntos.length > 0) {
       const documentoAdjuntos = {
         responseId: result.insertedId,
         submittedAt: new Date().toISOString(),
-        adjuntos: [] // Array vacío inicial - se llenará con el endpoint individual
+        adjuntos: []
       };
 
       await req.db.collection("adjuntos").insertOne(documentoAdjuntos);
-      console.log("✅ Documento de adjuntos creado (vacío)");
+      console.log("Documento de adjuntos creado (vacío)");
     }
 
     // El resto del código (notificaciones, generación de documento, etc.)
@@ -182,7 +173,6 @@ router.post("/", async (req, res) => {
       responses,
       formTitle,
       mail: correoRespaldo
-      // SIN adjuntosCount ni adjuntosPendientes
     });
 
   } catch (err) {
@@ -255,11 +245,11 @@ router.post("/:id/adjuntos", async (req, res) => {
       const nuevoDocumento = {
         responseId: new ObjectId(id),
         submittedAt: new Date().toISOString(),
-        adjuntos: [adjuntoNormalizado] // Array con el primer adjunto
+        adjuntos: [adjuntoNormalizado]
       };
 
       await req.db.collection("adjuntos").insertOne(nuevoDocumento);
-      console.log(`✅ Creado nuevo documento con primer adjunto`);
+      console.log(`Creado nuevo documento con primer adjunto`);
     } else {
       // Si existe, agregar al array manteniendo el formato
       await req.db.collection("adjuntos").updateOne(
@@ -268,7 +258,7 @@ router.post("/:id/adjuntos", async (req, res) => {
           $push: { adjuntos: adjuntoNormalizado }
         }
       );
-      console.log(`✅ Adjunto ${index + 1} agregado al documento existente`);
+      console.log(`Adjunto ${index + 1} agregado al documento existente`);
     }
 
     res.json({
@@ -292,7 +282,6 @@ router.get("/:id/adjuntos/:index", async (req, res) => {
 
     console.log("Descargando adjunto:", { id, index });
 
-    // CORRECCIÓN: Verificar si los IDs son válidos antes de convertirlos
     let query = {};
 
     if (ObjectId.isValid(id)) {
@@ -308,14 +297,11 @@ router.get("/:id/adjuntos/:index", async (req, res) => {
       return res.status(404).json({ error: "Archivo adjunto no encontrado" });
     }
 
-    // CORRECCIÓN: Verificar la estructura real de tus datos
     let archivoAdjunto;
 
     if (documentoAdjunto.adjuntos && documentoAdjunto.adjuntos.length > 0) {
-      // Si usas la nueva estructura con array 'adjuntos'
       archivoAdjunto = documentoAdjunto.adjuntos[parseInt(index)];
     } else if (documentoAdjunto.fileData) {
-      // Si usas la estructura antigua con campos directos
       archivoAdjunto = documentoAdjunto;
     } else {
       return res.status(404).json({ error: "Estructura de archivo no válida" });
@@ -363,7 +349,7 @@ router.get("/mail/:mail", async (req, res) => {
         _id: 1,
         formId: 1,
         formTitle: 1,
-        "responses": 1, // Incluir todo el objeto responses para procesar después
+        "responses": 1,
         "user.nombre": 1,
         "user.empresa": 1,
         "user.uid": 1,
@@ -382,7 +368,6 @@ router.get("/mail/:mail", async (req, res) => {
 
     // Procesar las respuestas en JavaScript
     const answersProcessed = answers.map(answer => {
-      // Buscar el nombre del trabajador en diferentes formatos
       let trabajador = "No especificado";
 
       if (answer.responses) {
@@ -419,7 +404,7 @@ router.get("/mini", async (req, res) => {
         _id: 1,
         formId: 1,
         formTitle: 1,
-        "responses": 1, // Incluir todo el objeto responses para procesar después
+        "responses": 1,
         submittedAt: 1,
         "user.nombre": 1,
         "user.empresa": 1,
@@ -431,7 +416,6 @@ router.get("/mini", async (req, res) => {
 
     // Procesar las respuestas en JavaScript
     const answersProcessed = answers.map(answer => {
-      // Buscar el nombre del trabajador en diferentes formatos
       let trabajador = "No especificado";
 
       if (answer.responses) {
@@ -766,7 +750,7 @@ router.post("/:id/upload-correction", upload.single('correctedFile'), async (req
       { _id: new ObjectId(req.params.id) },
       {
         $set: {
-          hasCorrection: true,  // Solo bandera, no el archivo
+          hasCorrection: true,
           correctionFileName: normalizedFileName,
           updatedAt: new Date()
         }
@@ -1390,6 +1374,91 @@ router.post("/:id/regenerate-document", async (req, res) => {
   } catch (error) {
     console.error('Error regenerando documento:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Cambiar estado de respuesta (avanzar o retroceder)
+router.put("/:id/status", async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).json({ error: "ID de respuesta inválido" });
+    }
+
+    if (!status) {
+      return res.status(400).json({ error: "Estado requerido" });
+    }
+
+    // Validar estados permitidos
+    const estadosPermitidos = ['pendiente', 'en_revision', 'aprobado', 'firmado', 'finalizado', 'archivado'];
+    if (!estadosPermitidos.includes(status)) {
+      return res.status(400).json({ error: "Estado no válido" });
+    }
+
+    const respuesta = await req.db.collection("respuestas").findOne({
+      _id: new ObjectId(id)
+    });
+
+    if (!respuesta) {
+      return res.status(404).json({ error: "Respuesta no encontrada" });
+    }
+
+    // Configurar campos según el estado
+    const updateData = {
+      status: status,
+      updatedAt: new Date()
+    };
+
+    // Agregar timestamp específico según el estado
+    if (status === 'en_revision') {
+      updateData.reviewedAt = new Date();
+    } else if (status === 'aprobado') {
+      updateData.approvedAt = new Date();
+    } else if (status === 'firmado') {
+      updateData.signedAt = new Date();
+    } else if (status === 'finalizado') {
+      updateData.finalizedAt = new Date();
+    } else if (status === 'archivado') {
+      updateData.archivedAt = new Date();
+    }
+
+    const updateResult = await req.db.collection("respuestas").updateOne(
+      { _id: new ObjectId(id) },
+      { $set: updateData }
+    );
+
+    if (updateResult.matchedCount === 0) {
+      return res.status(404).json({ error: "No se pudo actualizar la respuesta" });
+    }
+
+    const updatedResponse = await req.db.collection("respuestas").findOne({
+      _id: new ObjectId(id)
+    });
+
+    // Enviar notificación al usuario si aplica
+    if (status === 'en_revision') {
+      await addNotification(req.db, {
+        userId: respuesta?.user?.uid,
+        titulo: "Respuestas En Revisión",
+        descripcion: `Formulario ${respuesta.formTitle} ha cambiado su estado a En Revisión.`,
+        prioridad: 2,
+        icono: 'FileText',
+        color: '#00c6f8ff',
+        actionUrl: `/?id=${id}`,
+      });
+    }
+
+    res.json({
+      success: true,
+      message: `Estado cambiado a '${status}'`,
+      updatedRequest: updatedResponse
+    });
+
+  } catch (err) {
+    console.error("Error cambiando estado:", err);
+    res.status(500).json({ error: "Error cambiando estado: " + err.message });
   }
 });
 

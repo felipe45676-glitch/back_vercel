@@ -47,15 +47,22 @@ router.get("/", async (req, res) => {
 
 router.get("/solicitud", async (req, res) => {
   try {
-    const usr = await req.db
+    const usuarios = await req.db
       .collection("usuarios")
-      .find().toArray();
+      .find({}, { projection: { nombre: 1, apellido: 1, mail: 1, empresa: 1 } })
+      .toArray();
 
-    if (!usr) return res.status(404).json({ error: "Usuario no encontrado" });
+    const usuariosFormateados = usuarios.map(usr => ({
+      nombre: usr.nombre,
+      apellido: usr.apellido,
+      correo: usr.mail,
+      empresa: usr.empresa
+    }));
 
-    res.json({nombre: usr.nombre, apellido: usr.apellido, correo: usr.mail, empresa: usr.empresa});
+    res.json(usuariosFormateados);
   } catch (err) {
-    res.status(500).json({ error: "Error al obtener Usuario" });
+    console.error(err);
+    res.status(500).json({ error: "Error al obtener usuarios" });
   }
 });
 

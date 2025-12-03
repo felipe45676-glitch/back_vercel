@@ -190,7 +190,7 @@ router.post("/login", async (req, res) => {
     }
 
     const result = await req.db.collection("ingresos").insertOne(newLogin);
-
+/*
     // Envío de Notificación
     await addNotification(req.db, {
       userId: user._id.toString(),
@@ -203,7 +203,7 @@ router.post("/login", async (req, res) => {
       color: "#d42a00ff",
       icono: "User",
     });
-
+*/
     // Retornar el token reutilizado o el recién generado
     return res.json({ success: true, token: finalToken, usr });
   } catch (err) {

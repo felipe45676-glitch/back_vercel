@@ -1061,18 +1061,18 @@ router.get("/:id/archived", async (req, res) => {
 // ============ NUEVOS ENDPOINTS PARA MÚLTIPLES ARCHIVOS ============
 
 // 1. SUBIR MÚLTIPLES ARCHIVOS CORREGIDOS
+// Cambia el endpoint para recibir archivos uno por uno
 router.post("/upload-corrected-files", async (req, res) => {
   try {
-    console.log("=== INICIO UPLOAD CORRECTED FILES ===");
+    console.log("=== INICIO UPLOAD CORRECTED FILES INDIVIDUAL ===");
 
-    // Usar el middleware de multer para múltiples archivos
     uploadMultiple.array('files', 10)(req, res, async (err) => {
       if (err) {
         console.error("Error en uploadMultiple:", err);
         return res.status(400).json({ error: err.message });
       }
 
-      const { responseId } = req.body;
+      const { responseId, index, total } = req.body;
       const files = req.files;
 
       if (!responseId) {
@@ -1080,10 +1080,10 @@ router.post("/upload-corrected-files", async (req, res) => {
       }
 
       if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No se subieron archivos' });
+        return res.status(400).json({ error: 'No se subió ningún archivo' });
       }
 
-      console.log(`Subiendo ${files.length} archivo(s) para respuesta: ${responseId}`);
+      console.log(`Subiendo archivo ${index + 1} de ${total} para respuesta: ${responseId}`);
 
       // Verificar que la respuesta existe
       const respuestaExistente = await req.db.collection("respuestas").findOne({
@@ -1094,16 +1094,17 @@ router.post("/upload-corrected-files", async (req, res) => {
         return res.status(404).json({ error: "Respuesta no encontrada" });
       }
 
-      // Procesar cada archivo
-      const correctedFiles = files.map((file, index) => ({
+      // Procesar el archivo (solo debería haber uno si es individual)
+      const file = files[0];
+      const correctedFile = {
         fileName: normalizeFilename(file.originalname),
         tipo: 'pdf',
         fileData: file.buffer,
         fileSize: file.size,
         mimeType: file.mimetype,
         uploadedAt: new Date(),
-        order: index + 1
-      }));
+        order: parseInt(index) + 1 || 1
+      };
 
       // Buscar si ya existe un documento en aprobados
       const existingApproval = await req.db.collection("aprobados").findOne({
@@ -1111,24 +1112,24 @@ router.post("/upload-corrected-files", async (req, res) => {
       });
 
       if (existingApproval) {
-        // Actualizar agregando los nuevos archivos
+        // Si existe, agregar al array correctedFiles
         await req.db.collection("aprobados").updateOne(
           { responseId: responseId },
           {
             $push: {
-              correctedFiles: { $each: correctedFiles }
+              correctedFiles: correctedFile
             },
             $set: {
               updatedAt: new Date()
             }
           }
         );
-        console.log(`Actualizado documento aprobado existente con ${files.length} nuevos archivos`);
+        console.log(`Agregado archivo ${index + 1} a documento existente`);
       } else {
         // Crear nuevo documento en aprobados
         await req.db.collection("aprobados").insertOne({
           responseId: responseId,
-          correctedFiles: correctedFiles,
+          correctedFiles: [correctedFile],
           createdAt: new Date(),
           updatedAt: new Date(),
           approvedAt: null,
@@ -1137,7 +1138,7 @@ router.post("/upload-corrected-files", async (req, res) => {
           submittedBy: respuestaExistente.submittedBy,
           company: respuestaExistente.company
         });
-        console.log(`Creado nuevo documento aprobado con ${files.length} archivos`);
+        console.log(`Creado nuevo documento aprobado con primer archivo`);
       }
 
       // Actualizar la respuesta para indicar que tiene correcciones
@@ -1153,15 +1154,17 @@ router.post("/upload-corrected-files", async (req, res) => {
 
       res.json({
         success: true,
-        message: `${files.length} archivo(s) subido(s) exitosamente`,
-        totalFiles: correctedFiles.length,
-        fileNames: correctedFiles.map(f => f.fileName)
+        message: `Archivo ${index + 1} de ${total} subido exitosamente`,
+        fileName: correctedFile.fileName,
+        index: index,
+        total: total,
+        uploadedCount: parseInt(index) + 1
       });
     });
 
   } catch (error) {
-    console.error('Error subiendo archivos corregidos:', error);
-    res.status(500).json({ error: `Error subiendo archivos: ${error.message}` });
+    console.error('Error subiendo archivo corregido:', error);
+    res.status(500).json({ error: `Error subiendo archivo: ${error.message}` });
   }
 });
 

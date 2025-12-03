@@ -8,7 +8,6 @@ const { enviarCorreoRespaldo } = require("../utils/mailrespaldo.helper");
 const { validarToken } = require("../utils/validarToken.js");
 
 
-// Función para normalizar nombres de archivos (con mapeo de caracteres)
 // Función para normalizar nombres de archivos (versión completa y segura)
 const normalizeFilename = (filename) => {
   // Asegurarse de que filename sea siempre un string

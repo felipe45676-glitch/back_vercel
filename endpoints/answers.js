@@ -15,6 +15,7 @@ const normalizeFilename = (filename) => {
     filename = String(filename || `documento_sin_nombre_${Date.now()}`);
   }
 
+  //conmongo
   // Manejo seguro de la extensión
   const lastDotIndex = filename.lastIndexOf('.');
   let extension = '';

@@ -147,18 +147,32 @@ router.get("/full/:mail", async (req, res) => {
   try {
     const usr = await req.db
       .collection("usuarios")
-      .findOne({ mail: req.params.mail.toLowerCase().trim() });
+      .findOne({
+        mail: req.params.mail.toLowerCase().trim()
+      }, {
+        projection: {
+          _id: 1,
+          nombre: 1,
+          mail: 1,
+          empresa: 1,
+          cargo: 1,
+          rol: 1,
+          notificaciones: 1
+        }
+      });
 
     if (!usr) return res.status(404).json({ error: "Usuario no encontrado" });
 
-    // IMPORTANTE: Devolver el objeto completo para llenar el perfil
+    // Asegurar que notificaciones exista como array
+    if (!usr.notificaciones) {
+      usr.notificaciones = [];
+    }
+
     res.json(usr);
   } catch (err) {
     res.status(500).json({ error: "Error al obtener Usuario completo" });
   }
 });
-
-
 
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;

@@ -157,7 +157,8 @@ router.get("/full/:mail", async (req, res) => {
           empresa: 1,
           cargo: 1,
           rol: 1,
-          notificaciones: 1
+          notificaciones: 1,
+          twoFactorEnabled: 1
         }
       });
 

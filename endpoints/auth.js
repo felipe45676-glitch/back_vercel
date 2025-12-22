@@ -6,6 +6,8 @@ const multer = require('multer');
 const { addNotification } = require("../utils/notificaciones.helper");
 const { sendEmail } = require("../utils/mail.helper"); // Importación del helper de correo
 const useragent = require('useragent');
+const { createBlindIndex, verifyPassword, decrypt } = require("../utils/seguridad.helper");
+
 
 const TOKEN_EXPIRATION = 12 * 1000 * 60 * 60;
 // Constante para la expiración del código de recuperación (ej: 15 minutos)
@@ -87,19 +89,27 @@ const generateAndSend2FACode = async (db, user, type) => {
 
 router.get("/", async (req, res) => {
   try {
-    const usr = await req.db.collection("usuarios").find().toArray();
+    const usuarios = await req.db.collection("usuarios").find().toArray();
 
-    if (!usr || usr.length === 0) {
+    if (!usuarios || usuarios.length === 0) {
       return res.status(404).json({ error: "Usuarios no encontrados" });
     }
 
-    // Eliminar el campo 'pass' de cada usuario
-    const usuariosSinPass = usr.map(usuario => {
-      const { pass, ...usuarioSinPass } = usuario;
-      return usuarioSinPass;
+    // Mapear usuarios, eliminar pass y descifrar campos sensibles
+    const usuariosProcesados = usuarios.map(u => {
+      const { pass, ...resto } = u;
+
+      return {
+        ...resto,
+        nombre: decrypt(u.nombre),
+        apellido: decrypt(u.apellido),
+        cargo: decrypt(u.cargo),
+        empresa: decrypt(u.empresa),
+        mail: decrypt(u.mail)
+      };
     });
 
-    res.status(200).json(usuariosSinPass);
+    res.status(200).json(usuariosProcesados);
 
   } catch (err) {
     console.error("Error al obtener usuarios:", err);
@@ -131,24 +141,43 @@ router.get("/solicitud", async (req, res) => {
 
 router.get("/:mail", async (req, res) => {
   try {
+    // 1. Limpiamos el parámetro de entrada
+    const cleanMail = req.params.mail.toLowerCase().trim();
+
+    // 2. Buscamos utilizando el Blind Index (Hash SHA-256)
+    // Esto permite que MongoDB use índices y la respuesta sea instantánea
     const usr = await req.db
       .collection("usuarios")
-      .findOne({ mail: req.params.mail.toLowerCase().trim() });
+      .findOne({ mail_index: createBlindIndex(cleanMail) });
 
-    if (!usr) return res.status(404).json({ error: "Usuario no encontrado" });
+    if (!usr) {
+      return res.status(404).json({ error: "Usuario no encontrado" });
+    }
 
-    res.json({ id: usr._id, empresa: usr.empresa, cargo: usr.cargo });
+    // 3. Retornamos los datos. 
+    // Nota: Si 'empresa' o 'cargo' estuvieran cifrados, deberías usar decrypt() aquí.
+    res.json({
+      id: usr._id,
+      empresa: usr.empresa,
+      cargo: usr.cargo || usr.rol
+    });
+
   } catch (err) {
+    console.error("Error al obtener Usuario por mail:", err);
     res.status(500).json({ error: "Error al obtener Usuario" });
   }
 });
 
+// auth.js - Ruta /full/:mail CORREGIDA
 router.get("/full/:mail", async (req, res) => {
   try {
+    const { mail } = req.params;
+    const mailIndex = createBlindIndex(mail.toLowerCase().trim()); // Crear el hash del email
+
     const usr = await req.db
       .collection("usuarios")
       .findOne({
-        mail: req.params.mail.toLowerCase().trim()
+        mail_index: mailIndex // Buscar por el índice hash, no por el mail cifrado
       }, {
         projection: {
           _id: 1,
@@ -157,7 +186,8 @@ router.get("/full/:mail", async (req, res) => {
           empresa: 1,
           cargo: 1,
           rol: 1,
-          notificaciones: 1
+          notificaciones: 1,
+          twoFactorEnabled: 1
         }
       });
 
@@ -168,8 +198,13 @@ router.get("/full/:mail", async (req, res) => {
       usr.notificaciones = [];
     }
 
+    // Opcional: Descifrar los campos cifrados si es necesario para el frontend
+    usr.nombre = decrypt(usr.nombre);
+    usr.mail = decrypt(usr.mail);
+
     res.json(usr);
   } catch (err) {
+    console.error("Error en /full/:mail:", err);
     res.status(500).json({ error: "Error al obtener Usuario completo" });
   }
 });
@@ -177,38 +212,40 @@ router.get("/full/:mail", async (req, res) => {
 router.post("/login", async (req, res) => {
   const { email, password } = req.body;
 
-  try {
-    const user = await req.db.collection("usuarios").findOne({ mail: email.toLowerCase().trim() });
-    if (!user) return res.status(401).json({ success: false, message: "Credenciales inválidas" });
+  if (!email || !password) {
+    return res.status(400).json({ success: false, message: "Datos incompletos" });
+  }
 
-    // Validaciones de estado
-    if (user.estado === "pendiente")
+  try {
+    const normalizedEmail = email.toLowerCase().trim();
+
+    // Buscar usuario por blind index
+    const user = await req.db.collection("usuarios").findOne({
+      mail_index: createBlindIndex(normalizedEmail)
+    });
+
+    if (!user || !(await verifyPassword(user.pass, password))) {
+      return res.status(401).json({ success: false, message: "Credenciales inválidas" });
+    }
+
+    // Estados
+    if (user.estado === "pendiente") {
       return res.status(401).json({
         success: false,
-        message: "Usuario pendiente de activación. Revisa tu correo para establecer tu contraseña."
+        message: "Usuario pendiente de activación. Revisa tu correo."
       });
+    }
 
-    if (user.estado === "inactivo")
+    if (user.estado === "inactivo") {
       return res.status(401).json({
         success: false,
         message: "Usuario inactivo. Contacta al administrador."
       });
+    }
 
-    // Validación de contraseña (asumiendo pass plano)
-    if (user.pass !== password)
-      return res.status(401).json({ success: false, message: "Credenciales inválidas" });
-
-    // ----------------------------------------------------------------
-    // 🔒 LÓGICA 2FA CONDICIONAL
-    // ----------------------------------------------------------------
-
-    const is2FAEnabled = user.twoFactorEnabled === true;
-
-    if (is2FAEnabled) {
-      // LLAMADA CORREGIDA: Usar '2FA_LOGIN'
+    if (user.twoFactorEnabled === true) {
       await generateAndSend2FACode(req.db, user, '2FA_LOGIN');
 
-      // Retornamos la bandera `twoFA: true`
       return res.json({
         success: true,
         twoFA: true,
@@ -216,38 +253,26 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    // ----------------------------------------------------------------
-    // 🚀 LÓGICA DE TOKEN (Solo si 2FA NO está activa)
-    // ----------------------------------------------------------------
-
     const now = new Date();
     let finalToken = null;
     let expiresAt = null;
-    const normalizedEmail = email.toLowerCase().trim();
 
-    // 1. Buscar un token activo para este usuario
-    const existingTokenRecord = await req.db.collection("tokens").findOne({
+    const existingToken = await req.db.collection("tokens").findOne({
       email: normalizedEmail,
       active: true
     });
 
-    if (existingTokenRecord) {
-      const existingExpiresAt = new Date(existingTokenRecord.expiresAt);
-      const isExpired = existingExpiresAt < now;
-
-      if (isExpired) {
+    if (existingToken && new Date(existingToken.expiresAt) > now) {
+      finalToken = existingToken.token;
+      expiresAt = existingToken.expiresAt;
+    } else {
+      if (existingToken) {
         await req.db.collection("tokens").updateOne(
-          { _id: existingTokenRecord._id },
+          { _id: existingToken._id },
           { $set: { active: false, revokedAt: now } }
         );
-      } else {
-        finalToken = existingTokenRecord.token;
-        expiresAt = existingExpiresAt;
       }
-    }
 
-    // 2. Si no hay un token válido, generar uno nuevo
-    if (!finalToken) {
       finalToken = crypto.randomBytes(32).toString("hex");
       expiresAt = new Date(Date.now() + TOKEN_EXPIRATION);
 
@@ -261,28 +286,43 @@ router.post("/login", async (req, res) => {
       });
     }
 
-    // 3. Registrar Ingreso
+    let nombre = "";
+    try {
+      nombre = decrypt(user.nombre);
+    } catch {
+      nombre = user.nombre || "";
+    }
+
     const ipAddress = req.ip || req.connection.remoteAddress;
-    const userAgentString = req.headers['user-agent'] || 'Desconocido';
-    const agent = useragent.parse(userAgentString);
-    const usr = { name: user.nombre, email: normalizedEmail, cargo: user.rol };
+    const agent = useragent.parse(req.headers["user-agent"] || "Desconocido");
 
     await req.db.collection("ingresos").insertOne({
-      usr,
+      usr: {
+        name: nombre,
+        email: normalizedEmail,
+        cargo: user.rol
+      },
       ipAddress,
-      os: agent.os.toString(),
-      browser: agent.toAgent(),
-      now: now,
+      os: agent.os?.toString?.() || "Desconocido",
+      browser: agent.toAgent?.() || "Desconocido",
+      now
     });
 
-    // 4. Retornar el token
-    return res.json({ success: true, token: finalToken, usr });
+    return res.json({
+      success: true,
+      token: finalToken,
+      usr: {
+        name: nombre,
+        email: normalizedEmail,
+        cargo: user.rol
+      }
+    });
+
   } catch (err) {
     console.error("Error en login:", err);
     return res.status(500).json({ error: "Error interno en login" });
   }
 });
-
 
 router.post("/verify-login-2fa", async (req, res) => {
   const { email, verificationCode } = req.body;
@@ -371,74 +411,27 @@ router.post("/verify-login-2fa", async (req, res) => {
 // =================================================================
 // 🔑 ENDPOINT 1: SOLICITAR RECUPERACIÓN (PASO 1)
 // =================================================================
+// --- RECUPERACION Y 2FA (LOGICA INTEGRADA) ---
 router.post("/recuperacion", async (req, res) => {
   const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({ message: "El correo electrónico es obligatorio." });
-  }
-
   try {
-    const user = await req.db.collection("usuarios").findOne({
-      mail: email.toLowerCase().trim()
-      // No validamos estado "activo" aquí para dar feedback si el email existe
-    });
+    const user = await req.db.collection("usuarios").findOne({ mail_index: createBlindIndex(email) });
+    if (!user || user.estado === "inactivo") return res.status(404).json({ message: "No disponible." });
 
-    // 1. Simular éxito si el usuario no existe para prevenir enumeración,
-    // pero para debug y flujo explícito, retornamos 404/401 si no está activo.
-    if (!user || user.estado === "inactivo") {
-      return res.status(404).json({ message: "Usuario no encontrado o no activo." });
-    }
-
-    // 2. Generar código de 6 dígitos numéricos
-    // Aseguramos que tenga 6 dígitos, rellenando con ceros si es necesario, aunque
-    // crypto.randomInt(100000, 999999) ya garantiza 6 dígitos.
-    const verificationCode = crypto.randomInt(100000, 999999).toString();
+    const code = crypto.randomInt(100000, 999999).toString();
     const expiresAt = new Date(Date.now() + RECOVERY_CODE_EXPIRATION);
 
-    // 3. Invalidar códigos anteriores para este usuario/email (Limpieza)
-    await req.db.collection("recovery_codes").updateMany(
-      { email: email.toLowerCase().trim(), active: true },
-      { $set: { active: false, revokedAt: new Date(), reason: "new_code_issued" } }
-    );
-
-    // 4. Guardar el nuevo código en la colección temporal
-    await req.db.collection("recovery_codes").insertOne({
-      email: email.toLowerCase().trim(),
-      code: verificationCode,
-      userId: user._id.toString(), // Guardamos el ID por conveniencia
-      createdAt: new Date(),
-      expiresAt: expiresAt,
-      active: true
-    });
-
-    // 5. Enviar el email
-    const htmlContent = `
-            <p>Hola ${user.nombre},</p>
-            <p>Hemos recibido una solicitud para restablecer la contraseña de tu cuenta Acciona.</p>
-            <p>Tu código de verificación es:</p>
-            <h2 style="color: #f97316; font-size: 24px; text-align: center; border: 1px solid #f97316; padding: 10px; border-radius: 8px;">
-                ${verificationCode}
-            </h2>
-            <p>Este código expira en 15 minutos. Si no solicitaste este cambio, ignora este correo.</p>
-            <p>Saludos cordiales,</p>
-            <p>El equipo de Acciona</p>
-        `;
+    await req.db.collection("recovery_codes").updateMany({ email: email.toLowerCase().trim(), active: true }, { $set: { active: false } });
+    await req.db.collection("recovery_codes").insertOne({ email: email.toLowerCase().trim(), code, userId: user._id.toString(), createdAt: new Date(), expiresAt, active: true });
 
     await sendEmail({
       to: email,
-      subject: 'Código de Recuperación de Contraseña - Acciona',
-      html: htmlContent
+      subject: 'Recuperación de Contraseña',
+      html: `<h2>Tu código es: ${code}</h2>`
     });
 
-    // 6. Respuesta al cliente (status 200 para pasar al paso 2)
-    res.status(200).json({ success: true, message: "Código de recuperación enviado." });
-
-  } catch (err) {
-    console.error("Error en /recuperacion:", err);
-    // Error genérico si el envío falla o hay un error de DB
-    res.status(500).json({ message: "Error interno al procesar la solicitud." });
-  }
+    res.json({ success: true, message: "Enviado." });
+  } catch (err) { res.status(500).json({ error: "Error interno" }); }
 });
 
 // =================================================================
@@ -671,47 +664,36 @@ router.post("/logout", async (req, res) => {
 router.post("/register", async (req, res) => {
   try {
     const { nombre, apellido, mail, empresa, cargo, rol, estado } = req.body;
-    if (!nombre || !apellido || !mail || !empresa || !cargo || !rol) {
-      return res.status(400).json({ error: "Todos los campos son obligatorios" });
-    }
-    const existingUser = await req.db.collection("usuarios").findOne({ mail });
-    if (existingUser) {
+    const m = mail.toLowerCase().trim();
+
+    if (await req.db.collection("usuarios").findOne({ mail_index: createBlindIndex(m) })) {
       return res.status(400).json({ error: "El usuario ya existe" });
     }
+
     const newUser = {
-      nombre,
-      apellido,
-      mail: mail.toLowerCase().trim(),
-      empresa,
-      cargo,
-      rol,
-      pass: "",
-      estado: estado,
+      nombre: encrypt(nombre),
+      apellido: encrypt(apellido),
+      mail: encrypt(m),
+      mail_index: createBlindIndex(m),
+      empresa, cargo, rol, pass: "",
+      estado: estado || "pendiente",
+      twoFactorEnabled: false,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString()
     };
+
     const result = await req.db.collection("usuarios").insertOne(newUser);
-    const createdUser = await req.db.collection("usuarios").findOne({
-      _id: result.insertedId
-    });
 
     await addNotification(req.db, {
       userId: result.insertedId.toString(),
       titulo: `Registro Exitoso!`,
-      descripcion: `Bienvenid@ a nuestra plataforma Virtual Acciona!`, // Agregamos la info aquí
-      prioridad: 2,
-      color: "#7afb24ff",
-      icono: "User",
+      descripcion: `Bienvenid@ a nuestra plataforma Virtual Acciona!`,
+      prioridad: 2, color: "#7afb24ff", icono: "User",
     });
 
-    res.status(201).json({
-      success: true,
-      message: "Usuario registrado exitosamente",
-      user: createdUser
-    });
+    res.status(201).json({ success: true, message: "Usuario registrado", userId: result.insertedId });
   } catch (err) {
-    console.error("Error al registrar usuario:", err);
-    res.status(500).json({ error: "Error interno del servidor" });
+    res.status(500).json({ error: "Error al registrar" });
   }
 });
 
@@ -863,6 +845,7 @@ router.delete("/users/:id", async (req, res) => {
   }
 });
 
+
 router.post("/set-password", async (req, res) => {
   try {
     const { userId, password } = req.body;
@@ -870,7 +853,7 @@ router.post("/set-password", async (req, res) => {
       return res.status(400).json({ error: "UserId y contraseña son requeridos" });
     }
 
-    // ✅ NUEVA VALIDACIÓN DE CONTRASEÑA EN BACKEND
+    // NUEVA VALIDACIÓN DE CONTRASEÑA EN BACKEND
     if (password.length < 8) {
       return res.status(400).json({
         error: "La contraseña debe tener al menos 8 caracteres"
@@ -888,7 +871,7 @@ router.post("/set-password", async (req, res) => {
     }
 
     // Validación adicional de seguridad (opcional pero recomendado)
-    if (password.length > 128) {
+    if (password.length > 64) {
       return res.status(400).json({
         error: "La contraseña es demasiado larga"
       });
@@ -921,20 +904,10 @@ router.post("/set-password", async (req, res) => {
       // });
     }
 
+    const hashed = await hashPassword(password);
     const result = await req.db.collection("usuarios").updateOne(
-      {
-        _id: new ObjectId(userId),
-        // Si quieres que el set-password funcione para recuperación de un usuario ACTIVO
-        // debes quitar la condición 'estado: "pendiente"'.
-        // Lo dejaré sin la condición para que funcione como "reset" en la recuperación.
-      },
-      {
-        $set: {
-          pass: password,
-          estado: "activo", // Aseguramos que el estado pase a activo (si estaba en pendiente)
-          updatedAt: new Date().toISOString()
-        }
-      }
+      { _id: new ObjectId(userId) },
+      { $set: { pass: hashed, estado: "activo", updatedAt: new Date().toISOString() } }
     );
 
     if (result.matchedCount === 0) {

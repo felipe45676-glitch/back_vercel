@@ -82,6 +82,181 @@ const uploadMultiple = multer({
   }
 });
 
+const generarContenidoCorreoRespaldo = (formTitle, usuario, fecha, responses, questions) => {
+
+  /**
+   * Función para procesar preguntas y respuestas en formato texto
+   * Similar a generarDocumentoTxt pero adaptado para correo
+   */
+  const generarContenidoRespuestas = (responses, questions) => {
+    let contenido = "RESPUESTAS DEL FORMULARIO\n";
+    contenido += "========================\n\n";
+
+    // Usar la misma lógica que en generarDocumentoTxt pero estructurado por preguntas
+    let index = 1;
+
+    // Procesar preguntas principales
+    const procesarPreguntas = (preguntas, nivel = 0, contexto = '') => {
+      let contenidoLocal = '';
+      const indent = '  '.repeat(nivel);
+
+      preguntas.forEach((pregunta, preguntaIndex) => {
+        if (!pregunta || !pregunta.title) return;
+
+        const tituloPregunta = pregunta.title;
+        const respuesta = obtenerRespuestaPorTitulo(tituloPregunta, responses);
+
+        // Solo mostrar si tiene respuesta o es requerida
+        const tieneRespuesta = respuesta !== undefined && respuesta !== null &&
+          respuesta !== '' && !(Array.isArray(respuesta) && respuesta.length === 0);
+
+        if (tieneRespuesta || pregunta.required) {
+          const numeroPregunta = nivel === 0 ? `${index}.` : `  ${preguntaIndex + 1}.`;
+          const tituloCompleto = contexto ? `${contexto} - ${tituloPregunta}` : tituloPregunta;
+
+          contenidoLocal += `${indent}${numeroPregunta} ${tituloCompleto}\n`;
+
+          // Formatear respuesta (igual que en TXT)
+          if (Array.isArray(respuesta)) {
+            contenidoLocal += `${indent}   - ${respuesta.join(`\n${indent}   - `)}\n\n`;
+          } else if (respuesta && typeof respuesta === 'object') {
+            contenidoLocal += `${indent}   ${JSON.stringify(respuesta, null, 2)}\n\n`;
+          } else {
+            contenidoLocal += `${indent}   ${respuesta || 'Sin respuesta'}\n\n`;
+          }
+
+          if (nivel === 0) index++;
+        }
+
+        // Procesar subsecciones (opciones con subformularios)
+        if (pregunta.options) {
+          pregunta.options.forEach((opcion, opcionIndex) => {
+            if (typeof opcion === 'object' && opcion.hasSubform && opcion.subformQuestions) {
+              const textoOpcion = opcion.text || `Opción ${opcionIndex + 1}`;
+              const opcionRespuesta = obtenerRespuestaPorTitulo(pregunta.title, responses);
+              const deberiaProcesar =
+                pregunta.type === 'single_choice' ? opcionRespuesta === textoOpcion :
+                  pregunta.type === 'multiple_choice' ? Array.isArray(opcionRespuesta) && opcionRespuesta.includes(textoOpcion) : false;
+
+              if (deberiaProcesar) {
+                contenidoLocal += procesarPreguntas(
+                  opcion.subformQuestions,
+                  nivel + 1,
+                  `${tituloPregunta} - ${textoOpcion}`
+                );
+              }
+            }
+          });
+        }
+      });
+
+      return contenidoLocal;
+    };
+
+    // Procesar preguntas principales
+    contenido += procesarPreguntas(questions || []);
+
+    // Procesar información contextual (igual que en TXT)
+    if (responses._contexto && Object.keys(responses._contexto).length > 0) {
+      contenido += "\n--- INFORMACIÓN DETALLADA POR SECCIÓN ---\n\n";
+
+      Object.keys(responses._contexto).forEach(contexto => {
+        contenido += `SECCIÓN: ${contexto}\n`;
+
+        Object.keys(responses._contexto[contexto]).forEach(pregunta => {
+          const respuesta = responses._contexto[contexto][pregunta];
+          contenido += `   ${pregunta}: ${respuesta}\n`;
+        });
+        contenido += "\n";
+      });
+    }
+
+    return contenido;
+  };
+
+  /**
+   * Obtiene respuesta por título (igual que en la versión anterior)
+   */
+  const obtenerRespuestaPorTitulo = (tituloPregunta, responses) => {
+    // Buscar directamente en responses
+    if (responses[tituloPregunta] !== undefined) {
+      return responses[tituloPregunta];
+    }
+
+    // Si no encuentra, buscar en _contexto si existe
+    if (responses._contexto) {
+      for (const contexto in responses._contexto) {
+        if (responses._contexto[contexto][tituloPregunta] !== undefined) {
+          return responses._contexto[contexto][tituloPregunta];
+        }
+      }
+    }
+
+    return undefined;
+  };
+
+  // Descifrar datos del usuario si están cifrados
+  let nombreUsuarioDescifrado = usuario.nombre;
+  let empresaDescifrada = usuario.empresa;
+  
+  try {
+    if (usuario.nombre && usuario.nombre.includes(':')) {
+      nombreUsuarioDescifrado = decrypt(usuario.nombre);
+    }
+    if (usuario.empresa && usuario.empresa.includes(':')) {
+      empresaDescifrada = decrypt(usuario.empresa);
+    }
+  } catch (error) {
+    console.error('Error descifrando datos del usuario para correo:', error);
+  }
+
+  // Usar el nombre del trabajador de las respuestas si está disponible
+  const nombreTrabajador = responses['Nombre del trabajador'] || nombreUsuarioDescifrado;
+
+  const contenidoRespuestas = generarContenidoRespuestas(responses, questions);
+
+  // Contenido en texto plano (estructura similar al TXT)
+  const texto = `RESPALDO DE RESPUESTAS - FORMULARIO: ${formTitle}
+=================================================
+
+INFORMACIÓN GENERAL:
+-------------------
+Trabajador: ${nombreTrabajador}
+Empresa: ${empresaDescifrada}
+Respondido por: ${nombreUsuarioDescifrado}
+Fecha y hora: ${fecha}
+
+${contenidoRespuestas}
+---
+Este es un respaldo automático de las respuestas enviadas.
+Generado el: ${fecha}
+`;
+
+  // Contenido en HTML (manteniendo formato legible)
+  const html = `
+<div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
+  <h2 style="color: #2c3e50; border-bottom: 2px solid #3498db; padding-bottom: 10px;">
+    Tiket Recibido
+  </h2>
+  
+  <div style="background: #f8f9fa; padding: 15px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #3498db;">
+    <h3 style="color: #2c3e50; margin-top: 0;">INFORMACIÓN GENERAL</h3>
+    <p><strong>Trabajador:</strong> ${nombreTrabajador}</p>
+    <p><strong>Empresa:</strong> ${empresaDescifrada}</p>
+    <p><strong>Respondido por:</strong> ${nombreUsuarioDescifrado}</p>
+    <p><strong>Fecha y hora:</strong> ${fecha}</p>
+  </div>
+
+  <div style="margin-top: 20px; padding-top: 15px; border-top: 1px dashed #ccc; color: #7f8c8d; font-size: 12px;">
+    <em>Este es un respaldo automático de las respuestas enviadas.<br>
+    Generado el: ${fecha}</em>
+  </div>
+</div>
+`;
+
+  return { texto, html };
+};
+
 router.use(express.json({ limit: '4mb' }));
 
 // En el endpoint POST principal (/) - SOLO FORMATO ESPECÍFICO
@@ -91,8 +266,8 @@ router.post("/", async (req, res) => {
 
     // El usuario que viene del frontend ya debería estar descifrado en su sesión, 
     // pero para la lógica interna usamos sus datos.
-    const usuario = user?.nombre;
-    const empresa = user?.empresa;
+    const usuario = user;
+    let empresa = user?.empresa;
     const userId = user?.uid;
     const token = user?.token;
 
@@ -103,17 +278,26 @@ router.post("/", async (req, res) => {
       return res.status(401).json({ error: tokenValido.reason });
     }
 
+    // Descifrar empresa si está cifrada
+    let empresaDescifrada = empresa;
+    if (empresa && empresa.includes(':')) {
+      empresaDescifrada = decrypt(empresa);
+      console.log("Empresa descifrada para validación:", empresaDescifrada);
+    }
+
     let form = null;
     if (ObjectId.isValid(formId)) {
       form = await req.db.collection("forms").findOne({ _id: new ObjectId(formId) });
       if (!form) return res.status(404).json({ error: "Formulario no encontrado" });
 
-      const empresaAutorizada = form.companies?.includes(empresa) || form.companies?.includes("Todas");
+      // Las empresas en 'form.companies' probablemente están en texto plano o son ObjectIds
+      const empresaAutorizada = form.companies?.includes(empresaDescifrada) || 
+                                form.companies?.includes("Todas");
       if (!empresaAutorizada) {
-        return res.status(403).json({ error: `La empresa ${empresa} no está autorizada.` });
+        return res.status(403).json({ error: `La empresa ${empresaDescifrada} no está autorizada.` });
       }
     } else {
-      console.log(`Ticket creado con categoria estática: ${formId}`);
+      console.log(`Ticket creado: ${formId}`);
     }
 
     const result = await req.db.collection("soporte").insertOne({
@@ -136,36 +320,62 @@ router.post("/", async (req, res) => {
 
     // Enviar correo de respaldo
     if (correoRespaldo && correoRespaldo.trim() !== '') {
-      await enviarCorreoRespaldo(correoRespaldo, formTitle, user, responses, form?.questions || []);
+      const fechaHora = new Date().toLocaleString('es-CL', {
+        timeZone: 'America/Santiago',
+        dateStyle: 'full',
+        timeStyle: 'medium'
+      });
+      const questions = form?.questions || [];
+      const contenido = generarContenidoCorreoRespaldo(
+        formTitle,
+        usuario,
+        fechaHora,
+        responses,
+        questions
+      );
+
+      const mailPayload = {
+        accessKey: "wBlL283JH9TqdEJRxon1QOBuI0A6jGVEwpUYchnyMGz", // Reemplaza con tu clave real
+        to: correoRespaldo.trim(),
+        subject: `Ticket levantado`,
+        text: contenido.texto,
+        html: contenido.html
+      };
+
+      await sendEmail(mailPayload);
     }
 
-    // Notificaciones (RRHH y Admin)
+    // Descifrar nombre para notificaciones si está cifrado
+    let nombreUsuarioDescifrado = usuario;
+    if (typeof usuario === 'string' && usuario.includes(':')) {
+      nombreUsuarioDescifrado = decrypt(usuario);
+    }
+
     const notifData = {
-      titulo: `${usuario} de la empresa ${empresa} ha respondido el formulario ${formTitle}`,
+      titulo: `${nombreUsuarioDescifrado} de la empresa ${empresaDescifrada} ha levantado un ticket de soporte`,
       descripcion: adjuntos.length > 0 ? `Incluye ${adjuntos.length} archivo(s)` : "Revisar en panel.",
       prioridad: 2,
       color: "#bb8900ff",
-      icono: "form",
-      actionUrl: `/RespuestasForms?id=${result.insertedId}`,
+       icono: "CheckCircle",
+      actionUrl: `/Tickets?id=${result.insertedId}`,
     };
-    await addNotification(req.db, { filtro: { cargo: "RRHH" }, ...notifData });
-    await addNotification(req.db, { filtro: { cargo: "admin" }, ...notifData });
+    await addNotification(req.db, { filtro: { rol: "Admin" }, ...notifData });
 
     // Notificación al usuario
     await addNotification(req.db, {
       userId,
-      titulo: "Formulario completado",
-      descripcion: `El formulario ${formTitle} fue completado correctamente.`,
+      titulo: "Ticket enviado con éxito",
+      descripcion: `Se ha recibido correctamente su ticket. Su ID de solicitud es el ${result.insertedId}.`,
       prioridad: 2,
       icono: "CheckCircle",
       color: "#006e13ff",
-      actionUrl: `/?id=${result.insertedId}`,
+      actionUrl: `/soporte?id=${result.insertedId}`,
     });
 
     try {
       await generarAnexoDesdeRespuesta(responses, result.insertedId.toString(), req.db, form?.section || "Soporte General", {
         nombre: usuario,
-        empresa: empresa,
+        empresa: empresa, // Pasar empresa cifrada para que generador.helper la descifre
         uid: userId,
       }, formId, formTitle);
     } catch (error) {
@@ -331,7 +541,38 @@ router.get("/:id/adjuntos/:index", async (req, res) => {
 router.get("/", async (req, res) => {
   try {
     const answers = await req.db.collection("soporte").find().toArray();
-    res.json(answers);
+    
+    // Descifrar datos de usuario en cada respuesta
+    const answersDescifrados = answers.map(answer => {
+      const answerCopy = { ...answer };
+      
+      if (answerCopy.user && typeof answerCopy.user === 'object') {
+        try {
+          // Descifrar campos del usuario si están cifrados
+          if (answerCopy.user.nombre && answerCopy.user.nombre.includes(':')) {
+            answerCopy.user.nombre = decrypt(answerCopy.user.nombre);
+          }
+          if (answerCopy.user.apellido && answerCopy.user.apellido.includes(':')) {
+            answerCopy.user.apellido = decrypt(answerCopy.user.apellido);
+          }
+          if (answerCopy.user.mail && answerCopy.user.mail.includes(':')) {
+            answerCopy.user.mail = decrypt(answerCopy.user.mail);
+          }
+          if (answerCopy.user.empresa && answerCopy.user.empresa.includes(':')) {
+            answerCopy.user.empresa = decrypt(answerCopy.user.empresa);
+          }
+          if (answerCopy.user.cargo && answerCopy.user.cargo.includes(':')) {
+            answerCopy.user.cargo = decrypt(answerCopy.user.cargo);
+          }
+        } catch (error) {
+          console.error('Error descifrando datos de usuario en respuesta:', error);
+        }
+      }
+      
+      return answerCopy;
+    });
+    
+    res.json(answersDescifrados);
   } catch (err) {
     res.status(500).json({ error: "Error al obtener formularios" });
   }
@@ -340,34 +581,60 @@ router.get("/", async (req, res) => {
 router.get("/mail/:mail", async (req, res) => {
   try {
     const cleanMail = req.params.mail.toLowerCase().trim();
-    // No buscamos por "user.mail" directo porque ese valor en respuestas 
-    // podría ser plano o cifrado según cuando se guardó, pero el Blind Index 
-    // en la colección de usuarios es nuestra fuente de verdad.
-
-    // Primero validamos si el usuario existe para obtener su UID
-    const user = await req.db.collection("usuarios").findOne({ mail_index: createBlindIndex(cleanMail) });
+    // Usar Blind Index para buscar usuario
+    const mailSearchHash = createBlindIndex(cleanMail);
+    
+    const user = await req.db.collection("usuarios").findOne({ mail_index: mailSearchHash });
 
     if (!user) return res.status(404).json({ error: "Usuario no encontrado" });
 
-    // Ahora buscamos en respuestas por el UID del usuario (que es inmutable)
+    // Ahora buscamos en respuestas por el UID del usuario
     const answers = await req.db.collection("soporte").find({ "user.uid": user._id.toString() }).toArray();
 
     if (!answers || answers.length === 0) {
       return res.status(404).json({ error: "No se encontraron formularios" });
     }
 
-    const answersProcessed = answers.map(answer => ({
-      _id: answer._id,
-      formId: answer.formId,
-      formTitle: answer.formTitle,
-      trabajador: answer.responses?.["Nombre del trabajador"] || "No especificado",
-      responses: answer.responses,
-      user: answer.user,
-      status: answer.status,
-      createdAt: answer.createdAt,
-      approvedAt: answer.approvedAt,
-      updatedAt: answer.updatedAt
-    }));
+    // Descifrar datos de usuario en cada respuesta
+    const answersProcessed = answers.map(answer => {
+      const answerCopy = { ...answer };
+      
+      if (answerCopy.user && typeof answerCopy.user === 'object') {
+        try {
+          // Descifrar campos del usuario si están cifrados
+          if (answerCopy.user.nombre && answerCopy.user.nombre.includes(':')) {
+            answerCopy.user.nombre = decrypt(answerCopy.user.nombre);
+          }
+          if (answerCopy.user.apellido && answerCopy.user.apellido.includes(':')) {
+            answerCopy.user.apellido = decrypt(answerCopy.user.apellido);
+          }
+          if (answerCopy.user.mail && answerCopy.user.mail.includes(':')) {
+            answerCopy.user.mail = decrypt(answerCopy.user.mail);
+          }
+          if (answerCopy.user.empresa && answerCopy.user.empresa.includes(':')) {
+            answerCopy.user.empresa = decrypt(answerCopy.user.empresa);
+          }
+          if (answerCopy.user.cargo && answerCopy.user.cargo.includes(':')) {
+            answerCopy.user.cargo = decrypt(answerCopy.user.cargo);
+          }
+        } catch (error) {
+          console.error('Error descifrando datos de usuario en respuesta:', error);
+        }
+      }
+      
+      return {
+        _id: answerCopy._id,
+        formId: answerCopy.formId,
+        formTitle: answerCopy.formTitle,
+        trabajador: answerCopy.responses?.["Nombre del trabajador"] || "No especificado",
+        responses: answerCopy.responses,
+        user: answerCopy.user,
+        status: answerCopy.status,
+        createdAt: answerCopy.createdAt,
+        approvedAt: answerCopy.approvedAt,
+        updatedAt: answerCopy.updatedAt
+      };
+    });
 
     res.json(answersProcessed);
   } catch (err) {
@@ -388,44 +655,44 @@ router.get("/mini", async (req, res) => {
         "user.nombre": 1,
         "user.empresa": 1,
         status: 1,
+        assignedTo: 1,
         createdAt: 1,
         adjuntosCount: 1
       })
       .toArray();
 
-    // Procesar las respuestas en JavaScript
+    // Procesar y descifrar las respuestas
     const answersProcessed = answers.map(answer => {
-      let trabajador = "No especificado";
-
-      if (answer.responses) {
-        trabajador = answer.responses["Nombre del trabajador"] ||
-          answer.responses["NOMBRE DEL TRABAJADOR"] ||
-          answer.responses["nombre del trabajador"] ||
-          answer.responses["Nombre del Trabajador"] ||
-          answer.responses["Nombre Del trabajador "] ||
-          "No especificado";
-      }
-
-      let rutTrabajador = "No especificado";
-
-      if (answer.responses) {
-        rutTrabajador = answer.responses["RUT del trabajador"] ||
-          answer.responses["RUT DEL TRABAJADOR"] ||
-          answer.responses["rut del trabajador"] ||
-          answer.responses["Rut del Trabajador"] ||
-          answer.responses["Rut Del trabajador "] ||
-          "No especificado";
+      // Descifrar campos de usuario
+      let nombreDescifrado = answer.user?.nombre || "No especificado";
+      let empresaDescifrada = answer.user?.empresa || "No especificado";
+      
+      try {
+        if (nombreDescifrado.includes(':')) {
+          nombreDescifrado = decrypt(nombreDescifrado);
+        }
+        if (empresaDescifrada.includes(':')) {
+          empresaDescifrada = decrypt(empresaDescifrada);
+        }
+      } catch (error) {
+        console.error('Error descifrando datos en /mini:', error);
       }
 
       return {
         _id: answer._id,
         formId: answer.formId,
         formTitle: answer.formTitle,
-        trabajador: trabajador,
-        rutTrabajador: rutTrabajador,
+        trabajador: "No especificado",
+        rutTrabajador: "No especificado",
         submittedAt: answer.submittedAt,
-        user: answer.user,
+        user: {
+          nombre: nombreDescifrado,
+          empresa: empresaDescifrada,
+          uid: answer.user?.uid
+        },
         status: answer.status,
+        assignedTo: answer.assignedTo,
+        responses: answer.responses,
         createdAt: answer.createdAt,
         adjuntosCount: answer.adjuntosCount || 0
       };
@@ -445,7 +712,32 @@ router.get("/:id", async (req, res) => {
 
     if (!form) return res.status(404).json({ error: "Respuesta no encontrado" });
 
-    res.json(form);
+    // Descifrar datos de usuario si están cifrados
+    const formDescifrado = { ...form };
+    
+    if (formDescifrado.user && typeof formDescifrado.user === 'object') {
+      try {
+        if (formDescifrado.user.nombre && formDescifrado.user.nombre.includes(':')) {
+          formDescifrado.user.nombre = decrypt(formDescifrado.user.nombre);
+        }
+        if (formDescifrado.user.apellido && formDescifrado.user.apellido.includes(':')) {
+          formDescifrado.user.apellido = decrypt(formDescifrado.user.apellido);
+        }
+        if (formDescifrado.user.mail && formDescifrado.user.mail.includes(':')) {
+          formDescifrado.user.mail = decrypt(formDescifrado.user.mail);
+        }
+        if (formDescifrado.user.empresa && formDescifrado.user.empresa.includes(':')) {
+          formDescifrado.user.empresa = decrypt(formDescifrado.user.empresa);
+        }
+        if (formDescifrado.user.cargo && formDescifrado.user.cargo.includes(':')) {
+          formDescifrado.user.cargo = decrypt(formDescifrado.user.cargo);
+        }
+      } catch (error) {
+        console.error('Error descifrando datos de usuario en respuesta individual:', error);
+      }
+    }
+
+    res.json(formDescifrado);
 
   } catch (err) {
     res.status(500).json({ error: "Error al obtener Respuesta" });
@@ -516,7 +808,7 @@ router.delete("/:id", async (req, res) => {
 router.put("/:id/status", async (req, res) => {
   try {
     const { id } = req.params;
-    const { status } = req.body;
+    const { status, assignedTo } = req.body;
 
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({ error: "ID de respuesta inválido" });
@@ -526,8 +818,7 @@ router.put("/:id/status", async (req, res) => {
       return res.status(400).json({ error: "Estado requerido" });
     }
 
-    // Validar estados permitidos
-    const estadosPermitidos = ['pendiente', 'en_revision', 'aprobado', 'firmado', 'finalizado', 'archivado'];
+    const estadosPermitidos = ['pendiente', 'en_revision', 'finalizado', 'archivado'];
     if (!estadosPermitidos.includes(status)) {
       return res.status(400).json({ error: "Estado no válido" });
     }
@@ -540,15 +831,17 @@ router.put("/:id/status", async (req, res) => {
       return res.status(404).json({ error: "Respuesta no encontrada" });
     }
 
-    // Configurar campos según el estado
     const updateData = {
       status: status,
       updatedAt: new Date()
     };
 
-    // Agregar timestamp específico según el estado
     if (status === 'en_revision') {
       updateData.reviewedAt = new Date();
+      if (assignedTo) {
+        updateData.assignedTo = assignedTo;
+        updateData.assignedAt = new Date();
+      }
     } else if (status === 'aprobado') {
       updateData.approvedAt = new Date();
     } else if (status === 'firmado') {
@@ -572,12 +865,22 @@ router.put("/:id/status", async (req, res) => {
       _id: new ObjectId(id)
     });
 
+    // Descifrar datos para notificaciones si es necesario
+    let formTitleDescifrado = updatedResponse.formTitle;
+    try {
+      if (formTitleDescifrado && formTitleDescifrado.includes(':')) {
+        formTitleDescifrado = decrypt(formTitleDescifrado);
+      }
+    } catch (error) {
+      console.error('Error descifrando formTitle para notificación:', error);
+    }
+
     // Enviar notificación al usuario si aplica
     if (status === 'en_revision') {
       await addNotification(req.db, {
         userId: respuesta?.user?.uid,
         titulo: "Respuestas En Revisión",
-        descripcion: `Formulario ${respuesta.formTitle} ha cambiado su estado a En Revisión.`,
+        descripcion: `Formulario ${formTitleDescifrado} ha cambiado su estado a En Revisión.`,
         prioridad: 2,
         icono: 'FileText',
         color: '#00c6f8ff',
@@ -585,10 +888,25 @@ router.put("/:id/status", async (req, res) => {
       });
     }
 
+    // Descifrar datos del usuario antes de enviar respuesta
+    const updatedResponseDescifrado = { ...updatedResponse };
+    if (updatedResponseDescifrado.user && typeof updatedResponseDescifrado.user === 'object') {
+      try {
+        if (updatedResponseDescifrado.user.nombre && updatedResponseDescifrado.user.nombre.includes(':')) {
+          updatedResponseDescifrado.user.nombre = decrypt(updatedResponseDescifrado.user.nombre);
+        }
+        if (updatedResponseDescifrado.user.empresa && updatedResponseDescifrado.user.empresa.includes(':')) {
+          updatedResponseDescifrado.user.empresa = decrypt(updatedResponseDescifrado.user.empresa);
+        }
+      } catch (error) {
+        console.error('Error descifrando datos de usuario:', error);
+      }
+    }
+
     res.json({
       success: true,
       message: `Estado cambiado a '${status}'`,
-      updatedRequest: updatedResponse
+      updatedRequest: updatedResponseDescifrado
     });
 
   } catch (err) {

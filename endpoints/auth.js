@@ -6,13 +6,12 @@ const multer = require('multer');
 const { addNotification } = require("../utils/notificaciones.helper");
 const { sendEmail } = require("../utils/mail.helper");
 const useragent = require('useragent');
-const { createBlindIndex, verifyPassword, decrypt } = require("../utils/seguridad.helper");
+const { encrypt, createBlindIndex, verifyPassword, decrypt } = require("../utils/seguridad.helper");
 
 const getAhoraChile = () => {
   const d = new Date();
-  return new Date(d.toLocaleString("en-US", {timeZone: "America/Santiago"}));
+  return new Date(d.toLocaleString("en-US", { timeZone: "America/Santiago" }));
 };
-
 
 const TOKEN_EXPIRATION = 12 * 1000 * 60 * 60;
 const RECOVERY_CODE_EXPIRATION = 15 * 60 * 1000;
@@ -89,6 +88,54 @@ const generateAndSend2FACode = async (db, user, type) => {
   });
 };
 
+// Helper para buscar token por email (compatible con cifrado)
+const buscarTokenPorEmail = async (db, email) => {
+  const emailIndex = createBlindIndex(email.toLowerCase().trim());
+  return await db.collection("tokens").findOne({
+    email_index: emailIndex,
+    active: encrypt("true")
+  });
+};
+
+// Helper para crear nuevo token (con cifrado)
+const crearNuevoToken = async (db, user, email) => {
+  const token = crypto.randomBytes(32).toString("hex");
+  const expiresAt = new Date(Date.now() + TOKEN_EXPIRATION);
+  const now = getAhoraChile();
+
+  await db.collection("tokens").insertOne({
+    token: token,
+    email: encrypt(email.toLowerCase().trim()),
+    email_index: createBlindIndex(email.toLowerCase().trim()),
+    userId: user._id.toString(),
+    rol: encrypt(user.rol),
+    createdAt: now,
+    expiresAt: expiresAt,
+    active: encrypt("true")
+  });
+
+  return { token, expiresAt };
+};
+
+// Helper para desactivar token por email
+const desactivarTokenPorEmail = async (db, email) => {
+  const emailIndex = createBlindIndex(email.toLowerCase().trim());
+  const ahora = new Date();
+
+  await db.collection("tokens").updateOne(
+    {
+      email_index: emailIndex,
+      active: encrypt("true")
+    },
+    {
+      $set: {
+        active: encrypt("false"),
+        revokedAt: ahora
+      }
+    }
+  );
+};
+
 router.get("/", async (req, res) => {
   try {
     const usuarios = await req.db.collection("usuarios").find().toArray();
@@ -138,7 +185,6 @@ router.get("/solicitud", async (req, res) => {
     res.status(500).json({ error: "Error al obtener usuarios" });
   }
 });
-
 
 router.get("/:mail", async (req, res) => {
   try {
@@ -251,44 +297,36 @@ router.post("/login", async (req, res) => {
         success: true,
         twoFA: true,
         userId: user._id.toString(),
-        email: normalizedEmail, // IMPORTANTE: Devuelve también el email
+        email: normalizedEmail,
         message: "Se requiere código 2FA. Enviado a tu correo."
       });
     }
 
-    const now = getAhoraChile()
+    const now = getAhoraChile();
 
     let finalToken = null;
     let expiresAt = null;
 
-    const existingToken = await req.db.collection("tokens").findOne({
-      email: normalizedEmail,
-      active: true
-    });
+    // Buscar token existente usando email_index
+    const existingToken = await buscarTokenPorEmail(req.db, normalizedEmail);
 
-    if (existingToken && new Date(existingToken.expiresAt) > now) {
-      finalToken = existingToken.token;
-      expiresAt = existingToken.expiresAt;
-    } else {
-      if (existingToken) {
-        await req.db.collection("tokens").updateOne(
-          { _id: existingToken._id },
-          { $set: { active: false, revokedAt: now } }
-        );
+    if (existingToken) {
+      // Descifrar expiresAt y verificar
+      const expiresAtDescifrado = existingToken.expiresAt;
+      if (new Date(expiresAtDescifrado) > now) {
+        finalToken = existingToken.token;
+        expiresAt = expiresAtDescifrado;
+      } else {
+        // Token expirado, desactivarlo
+        await desactivarTokenPorEmail(req.db, normalizedEmail);
       }
+    }
 
-      finalToken = crypto.randomBytes(32).toString("hex");
-      expiresAt = new Date(Date.now() + TOKEN_EXPIRATION);
-
-      await req.db.collection("tokens").insertOne({
-        token: finalToken,
-        email: normalizedEmail,
-        userId: user._id.toString(),
-        rol: user.rol,
-        createdAt: now,
-        expiresAt,
-        active: true
-      });
+    if (!finalToken) {
+      // Crear nuevo token
+      const nuevoToken = await crearNuevoToken(req.db, user, normalizedEmail);
+      finalToken = nuevoToken.token;
+      expiresAt = nuevoToken.expiresAt;
     }
 
     let nombre = "";
@@ -405,39 +443,31 @@ router.post("/verify-login-2fa", async (req, res) => {
       { $set: { active: false, usedAt: now } }
     );
 
-    // ✅ RESTAURAR LÓGICA DE REUTILIZACIÓN DE TOKENS
+    // Lógica de tokens (compatible con cifrado)
     let finalToken = null;
     let expiresAt = null;
     const userEmail = decrypt(user.mail);
 
-    const existingTokenRecord = await req.db.collection("tokens").findOne({
-      email: userEmail,
-      active: true
-    });
+    // Buscar token existente
+    const existingTokenRecord = await buscarTokenPorEmail(req.db, userEmail);
 
-    if (existingTokenRecord && new Date(existingTokenRecord.expiresAt) > now) {
-      finalToken = existingTokenRecord.token;
-      expiresAt = existingTokenRecord.expiresAt;
-    } else {
-      if (existingTokenRecord) {
-        await req.db.collection("tokens").updateOne(
-          { _id: existingTokenRecord._id },
-          { $set: { active: false, revokedAt: now } }
-        );
+    if (existingTokenRecord) {
+      // Verificar si está activo y no expirado
+      const expiresAtDescifrado = existingTokenRecord.expiresAt;
+      if (new Date(expiresAtDescifrado) > now) {
+        finalToken = existingTokenRecord.token;
+        expiresAt = expiresAtDescifrado;
+      } else {
+        // Token expirado, desactivarlo
+        await desactivarTokenPorEmail(req.db, userEmail);
       }
+    }
 
-      finalToken = crypto.randomBytes(32).toString("hex");
-      expiresAt = new Date(now.getTime() + TOKEN_EXPIRATION);
-
-      await req.db.collection("tokens").insertOne({
-        token: finalToken,
-        email: userEmail,
-        userId: userId,
-        rol: user.rol,
-        createdAt: now,
-        expiresAt,
-        active: true
-      });
+    if (!finalToken) {
+      // Crear nuevo token
+      const nuevoToken = await crearNuevoToken(req.db, user, userEmail);
+      finalToken = nuevoToken.token;
+      expiresAt = nuevoToken.expiresAt;
     }
 
     // Registrar ingreso
@@ -566,8 +596,6 @@ router.post("/borrarpass", async (req, res) => {
   }
 });
 
-
-// SEND 2FA CODE - ACTIVACIÓN (ya corregido)
 router.post("/send-2fa-code", async (req, res) => {
   try {
     const { email } = req.body;
@@ -603,7 +631,6 @@ router.post("/send-2fa-code", async (req, res) => {
   }
 });
 
-// VERIFICAR ACTIVACIÓN 2FA - VERSIÓN CORREGIDA
 router.post("/verify-2fa-activation", async (req, res) => {
   const { email, verificationCode } = req.body;
 
@@ -672,7 +699,6 @@ router.post("/verify-2fa-activation", async (req, res) => {
   }
 });
 
-// DESACTIVAR 2FA - VERSIÓN CORREGIDA
 router.post("/disable-2fa", async (req, res) => {
   const { email } = req.body;
 
@@ -748,42 +774,153 @@ router.post("/validate", async (req, res) => {
     return res.status(401).json({ valid: false, message: "Acceso inválido" });
 
   try {
-    const tokenRecord = await req.db.collection("tokens").findOne({ token, active: true });
-    if (!tokenRecord)
-      return res.status(401).json({ valid: false, message: "Token inválido o inexistente" });
+    console.log("Validando token:", {
+      token: token.substring(0, 10) + "...",
+      email,
+      cargo
+    });
 
-    const now = new Date();
-    const expiresAt = new Date(tokenRecord.expiresAt);
-    const createdAt = new Date(tokenRecord.createdAt);
+    // Buscar token (el campo 'token' no está cifrado)
+    const tokenRecord = await req.db.collection("tokens").findOne({
+      token
+    });
 
-    const expired = expiresAt < now;
-
-    const isSameDay =
-      createdAt.getFullYear() === now.getFullYear() &&
-      createdAt.getMonth() === now.getMonth() &&
-      createdAt.getDate() === now.getDate();
-
-    if (expired) {
-      await req.db.collection("tokens").updateOne(
-        { token },
-        { $set: { active: false, revokedAt: new Date() } }
-      );
+    if (!tokenRecord) {
+      console.log("Token no encontrado en BD");
       return res.status(401).json({
         valid: false,
-        message: expired && "Token expirado. Inicia sesión nuevamente."
+        message: "Token inválido o inexistente"
       });
     }
 
-    if (tokenRecord.email !== email.toLowerCase().trim())
-      return res.status(401).json({ valid: false, message: "Token no corresponde al usuario" });
+    console.log("Token encontrado en BD:", {
+      _id: tokenRecord._id,
+      email: tokenRecord.email?.substring(0, 20) + "...",
+      hasEmailIndex: !!tokenRecord.email_index,
+      active: tokenRecord.active?.substring(0, 20) + "...",
+      revokedAt: tokenRecord.revokedAt,
+      expiresAt: tokenRecord.expiresAt
+    });
 
-    if (tokenRecord.rol !== cargo)
-      return res.status(401).json({ valid: false, message: "Cargo no corresponde al usuario" });
+    // 1. Verificar si está activo (descifrar campo 'active')
+    let activeDescifrado = "false"; // Por defecto
 
-    return res.json({ valid: true, user: { email: email.toLowerCase().trim(), cargo } });
+    try {
+      if (tokenRecord.active && tokenRecord.active.includes(':')) {
+        activeDescifrado = decrypt(tokenRecord.active);
+        console.log("Active descifrado:", activeDescifrado);
+      }
+    } catch (error) {
+      console.error("Error descifrando active:", error);
+      return res.status(401).json({
+        valid: false,
+        message: "Error en formato del token"
+      });
+    }
+
+    if (activeDescifrado !== "true") {
+      console.log("Token NO está activo. Active descifrado:", activeDescifrado);
+      return res.status(401).json({
+        valid: false,
+        message: "Token inactivo o revocado"
+      });
+    }
+
+    console.log("Token está activo ✓");
+
+    // 2. Verificar expiración
+    const now = new Date();
+    const expiresAt = new Date(tokenRecord.expiresAt);
+
+    if (expiresAt < now) {
+      console.log("Token EXPIRADO. ExpiresAt:", expiresAt, "Now:", now);
+
+      // Desactivar token (cifrar como "false")
+      await req.db.collection("tokens").updateOne(
+        { token },
+        {
+          $set: {
+            active: encrypt("false"),
+            revokedAt: new Date()
+          }
+        }
+      );
+
+      return res.status(401).json({
+        valid: false,
+        message: "Token expirado. Inicia sesión nuevamente."
+      });
+    }
+
+    console.log("Token NO expirado ✓");
+
+    // 3. Verificar email del token
+    let tokenEmailDescifrado = "";
+    try {
+      if (tokenRecord.email && tokenRecord.email.includes(':')) {
+        tokenEmailDescifrado = decrypt(tokenRecord.email);
+        console.log("Email descifrado del token:", tokenEmailDescifrado);
+      }
+    } catch (error) {
+      console.error("Error descifrando email del token:", error);
+      return res.status(401).json({
+        valid: false,
+        message: "Error en formato del token"
+      });
+    }
+
+    const emailNormalizado = email.toLowerCase().trim();
+    if (tokenEmailDescifrado !== emailNormalizado) {
+      console.log("Email NO coincide. Token email:", tokenEmailDescifrado, "Request email:", emailNormalizado);
+      return res.status(401).json({
+        valid: false,
+        message: "Token no corresponde al usuario"
+      });
+    }
+
+    console.log("Email coincide ✓");
+
+    // 4. Verificar rol del token
+    let tokenRolDescifrado = "";
+    try {
+      if (tokenRecord.rol && tokenRecord.rol.includes(':')) {
+        tokenRolDescifrado = decrypt(tokenRecord.rol);
+        console.log("Rol descifrado del token:", tokenRolDescifrado);
+      }
+    } catch (error) {
+      console.error("Error descifrando rol del token:", error);
+      return res.status(401).json({
+        valid: false,
+        message: "Error en formato del token"
+      });
+    }
+
+    if (tokenRolDescifrado !== cargo) {
+      console.log("Rol NO coincide. Token rol:", tokenRolDescifrado, "Request cargo:", cargo);
+      return res.status(401).json({
+        valid: false,
+        message: "Cargo no corresponde al usuario"
+      });
+    }
+
+    console.log("Rol coincide ✓");
+    console.log("Token VALIDADO EXITOSAMENTE");
+
+    return res.json({
+      valid: true,
+      user: {
+        email: emailNormalizado,
+        cargo
+      }
+    });
+
   } catch (err) {
     console.error("Error validando token:", err);
-    res.status(500).json({ valid: false, message: "Error interno al validar token" });
+    res.status(500).json({
+      valid: false,
+      message: "Error interno al validar token",
+      error: err.message
+    });
   }
 });
 
@@ -794,7 +931,12 @@ router.post("/logout", async (req, res) => {
   try {
     await req.db.collection("tokens").updateOne(
       { token },
-      { $set: { active: false, revokedAt: new Date() } }
+      {
+        $set: {
+          active: encrypt("false"), // Cifrar como string "false"
+          revokedAt: new Date()
+        }
+      }
     );
     res.json({ success: true, message: "Sesión cerrada" });
   } catch (err) {
@@ -941,8 +1083,8 @@ router.put("/users/:id", async (req, res) => {
       apellido: encrypt(apellido),
       mail: encrypt(userEmail),
       mail_index: mailIndex,
-      empresa: empresa,
-      cargo: cargo,
+      empresa: encrypt(empresa),
+      cargo: encrypt(cargo),
       rol,
       estado,
       updatedAt: new Date().toISOString()
@@ -958,9 +1100,19 @@ router.put("/users/:id", async (req, res) => {
     }
 
     const ahora = new Date();
+    // Desactivar token usando email_index (compatible con cifrado)
+    const emailIndex = createBlindIndex(userEmail);
     await req.db.collection("tokens").updateOne(
-      { email: userEmail, active: true },
-      { $set: { active: false, revokedAt: ahora } }
+      {
+        email_index: emailIndex,
+        active: encrypt("true")
+      },
+      {
+        $set: {
+          active: encrypt("false"),
+          revokedAt: ahora
+        }
+      }
     );
 
     res.json({
@@ -1070,9 +1222,62 @@ router.post("/set-password", async (req, res) => {
 router.get("/empresas/todas", async (req, res) => {
   try {
     const empresas = await req.db.collection("empresas").find().toArray();
-    res.json(empresas);
+
+    const empresasDescifradas = empresas.map(emp => {
+      // Descifrar campos de texto
+      const empresaDescifrada = {
+        _id: emp._id,
+        nombre: decrypt(emp.nombre),
+        rut: decrypt(emp.rut),
+        direccion: decrypt(emp.direccion),
+        encargado: decrypt(emp.encargado),
+        rut_encargado: decrypt(emp.rut_encargado),
+        createdAt: emp.createdAt,
+        updatedAt: emp.updatedAt,
+        logo: null
+      };
+
+      // Si tiene logo, procesarlo
+      if (emp.logo && emp.logo.fileData) {
+        try {
+          // El fileData está cifrado como Base64, necesitamos descifrarlo
+          const fileDataDescifrado = decrypt(emp.logo.fileData);
+
+          empresaDescifrada.logo = {
+            fileName: emp.logo.fileName,
+            fileData: fileDataDescifrado, // Base64 descifrado
+            fileSize: emp.logo.fileSize,
+            mimeType: emp.logo.mimeType,
+            uploadedAt: emp.logo.uploadedAt
+          };
+        } catch (error) {
+          console.error('Error procesando logo para empresa', emp._id, error);
+          // Mantener metadata pero sin fileData
+          empresaDescifrada.logo = {
+            fileName: emp.logo.fileName,
+            fileSize: emp.logo.fileSize,
+            mimeType: emp.logo.mimeType,
+            uploadedAt: emp.logo.uploadedAt,
+            error: "No se pudo descifrar"
+          };
+        }
+      } else if (emp.logo) {
+        // Si hay logo metadata pero no fileData (por si acaso)
+        empresaDescifrada.logo = {
+          fileName: emp.logo.fileName,
+          fileSize: emp.logo.fileSize,
+          mimeType: emp.logo.mimeType,
+          uploadedAt: emp.logo.uploadedAt,
+          note: "Sin datos de imagen"
+        };
+      }
+
+      return empresaDescifrada;
+    });
+
+    res.json(empresasDescifradas);
   } catch (err) {
-    console.error("Error obteniendo empresas:", err);
+    console.error("Error al obtener empresas:", err);
     res.status(500).json({ error: "Error al obtener empresas" });
   }
 });
@@ -1083,48 +1288,54 @@ router.get("/empresas/:id", async (req, res) => {
       _id: new ObjectId(req.params.id)
     });
 
-    if (!empresa) {
-      return res.status(404).json({ error: "Empresa no encontrada" });
+    if (!empresa) return res.status(404).json({ error: "Empresa no encontrada" });
+
+    const descifrada = {
+      ...empresa,
+      nombre: decrypt(empresa.nombre),
+      rut: decrypt(empresa.rut),
+      direccion: decrypt(empresa.direccion),
+      encargado: decrypt(empresa.encargado),
+      rut_encargado: decrypt(empresa.rut_encargado)
+    };
+
+    if (descifrada.logo && descifrada.logo.fileData) {
+      descifrada.logo.fileData = decrypt(descifrada.logo.fileData);
     }
 
-    res.json(empresa);
+    res.json(descifrada);
   } catch (err) {
-    console.error("Error obteniendo empresa:", err);
     res.status(500).json({ error: "Error al obtener empresa" });
   }
 });
 
 router.post("/empresas/register", upload.single('logo'), async (req, res) => {
   try {
-    console.log("Debug: Iniciando registro de empresa");
-    console.log("Debug: Datos recibidos:", req.body);
-
     const { nombre, rut, direccion, encargado, rut_encargado } = req.body;
+    if (!nombre || !rut) return res.status(400).json({ error: "Nombre y RUT obligatorios" });
 
-    if (!nombre || !rut) {
-      return res.status(400).json({ error: "Nombre y RUT son obligatorios" });
-    }
+    const nombreLimpio = nombre.trim();
+    const rutLimpio = rut.trim();
 
     const empresaExistente = await req.db.collection("empresas").findOne({
       $or: [
-        { nombre: nombre.trim() },
-        { rut: rut.trim() }
+        { nombre_index: createBlindIndex(nombreLimpio) },
+        { rut_index: createBlindIndex(rutLimpio) }
       ]
     });
 
     if (empresaExistente) {
-      const campoDuplicado = empresaExistente.nombre === nombre.trim() ? 'nombre' : 'RUT';
-      return res.status(400).json({
-        error: `Ya existe una empresa con el mismo ${campoDuplicado}`
-      });
+      return res.status(400).json({ error: "Ya existe una empresa con ese nombre o RUT" });
     }
 
     const empresaData = {
-      nombre: nombre.trim(),
-      rut: rut.trim(),
-      direccion: direccion ? direccion.trim() : '',
-      encargado: encargado ? encargado.trim() : '',
-      rut_encargado: rut_encargado ? rut_encargado.trim() : '',
+      nombre: encrypt(nombreLimpio),
+      nombre_index: createBlindIndex(nombreLimpio),
+      rut: encrypt(rutLimpio),
+      rut_index: createBlindIndex(rutLimpio),
+      direccion: encrypt(direccion || ''),
+      encargado: encrypt(encargado || ''),
+      rut_encargado: encrypt(rut_encargado || ''),
       createdAt: new Date(),
       updatedAt: new Date()
     };
@@ -1132,7 +1343,7 @@ router.post("/empresas/register", upload.single('logo'), async (req, res) => {
     if (req.file) {
       empresaData.logo = {
         fileName: req.file.originalname,
-        fileData: req.file.buffer,
+        fileData: encrypt(req.file.buffer.toString('base64')),
         fileSize: req.file.size,
         mimeType: req.file.mimetype,
         uploadedAt: new Date()
@@ -1140,46 +1351,33 @@ router.post("/empresas/register", upload.single('logo'), async (req, res) => {
     }
 
     const result = await req.db.collection("empresas").insertOne(empresaData);
-
-    console.log("Debug: Empresa registrada exitosamente, ID:", result.insertedId);
-
-    const nuevaEmpresa = await req.db.collection("empresas").findOne({
-      _id: result.insertedId
-    });
-
-    res.status(201).json({
-      message: "Empresa registrada exitosamente",
-      empresa: nuevaEmpresa
-    });
+    res.status(201).json({ success: true, id: result.insertedId });
 
   } catch (err) {
-    console.error("Error registrando empresa:", err);
-
-    if (err.code === 11000) {
-      return res.status(400).json({ error: "Empresa duplicada" });
-    }
-
-    res.status(500).json({ error: "Error al registrar empresa: " + err.message });
+    res.status(500).json({ error: "Error al registrar: " + err.message });
   }
 });
 
 router.put("/empresas/:id", upload.single('logo'), async (req, res) => {
   try {
     const { nombre, rut, direccion, encargado, rut_encargado } = req.body;
+    const id = new ObjectId(req.params.id);
 
     const updateData = {
-      nombre: nombre.trim(),
-      rut: rut.trim(),
-      direccion: direccion ? direccion.trim() : '',
-      encargado: encargado ? encargado.trim() : '',
-      rut_encargado: rut_encargado ? rut_encargado.trim() : '',
+      nombre: encrypt(nombre.trim()),
+      nombre_index: createBlindIndex(nombre.trim()),
+      rut: encrypt(rut.trim()),
+      rut_index: createBlindIndex(rut.trim()),
+      direccion: encrypt(direccion || ''),
+      encargado: encrypt(encargado || ''),
+      rut_encargado: encrypt(rut_encargado || ''),
       updatedAt: new Date()
     };
 
     if (req.file) {
       updateData.logo = {
         fileName: req.file.originalname,
-        fileData: req.file.buffer,
+        fileData: encrypt(req.file.buffer.toString('base64')),
         fileSize: req.file.size,
         mimeType: req.file.mimetype,
         uploadedAt: new Date()
@@ -1188,45 +1386,245 @@ router.put("/empresas/:id", upload.single('logo'), async (req, res) => {
       updateData.logo = null;
     }
 
-    const result = await req.db.collection("empresas").updateOne(
-      { _id: new ObjectId(req.params.id) },
-      { $set: updateData }
-    );
+    const result = await req.db.collection("empresas").updateOne({ _id: id }, { $set: updateData });
+    if (result.matchedCount === 0) return res.status(404).json({ error: "No encontrada" });
 
-    if (result.matchedCount === 0) {
-      return res.status(404).json({ error: "Empresa no encontrada" });
-    }
-
-    const empresaActualizada = await req.db.collection("empresas").findOne({
-      _id: new ObjectId(req.params.id)
-    });
-
-    res.json({
-      message: "Empresa actualizada exitosamente",
-      empresa: empresaActualizada
-    });
-
+    res.json({ success: true, message: "Empresa actualizada" });
   } catch (err) {
-    console.error("Error actualizando empresa:", err);
-    res.status(500).json({ error: "Error al actualizar empresa" });
+    res.status(500).json({ error: "Error al actualizar" });
   }
 });
 
 router.delete("/empresas/:id", async (req, res) => {
   try {
-    const result = await req.db.collection("empresas").deleteOne({
-      _id: new ObjectId(req.params.id)
-    });
+    const result = await req.db.collection("empresas").deleteOne({ _id: new ObjectId(req.params.id) });
+    if (result.deletedCount === 0) return res.status(404).json({ error: "No encontrada" });
+    res.json({ message: "Empresa eliminada exitosamente" });
+  } catch (err) {
+    res.status(500).json({ error: "Error al eliminar" });
+  }
+});
 
-    if (result.deletedCount === 0) {
-      return res.status(404).json({ error: "Empresa no encontrada" });
+router.get("/mantenimiento/migrar-empresas-pqc", async (req, res) => {
+  try {
+    const empresas = await req.db.collection("empresas").find().toArray();
+    let cont = 0;
+    let logosProcesados = 0;
+    let logosConError = 0;
+    let logosYaCifrados = 0;
+
+    console.log(`Iniciando migración de ${empresas.length} empresas...`);
+
+    for (let emp of empresas) {
+      const updates = {};
+      let procesado = false;
+
+      console.log(`\nProcesando empresa ${emp._id}:`);
+
+      // 1. Cifrar campos de texto
+      if (emp.nombre && !emp.nombre.includes(':')) {
+        updates.nombre = encrypt(emp.nombre);
+        updates.nombre_index = createBlindIndex(emp.nombre);
+        procesado = true;
+        console.log(`  ✓ Nombre cifrado`);
+      }
+
+      if (emp.rut && !emp.rut.includes(':')) {
+        updates.rut = encrypt(emp.rut);
+        updates.rut_index = createBlindIndex(emp.rut);
+        procesado = true;
+        console.log(`  ✓ RUT cifrado`);
+      }
+
+      if (emp.direccion && !emp.direccion.includes(':')) {
+        updates.direccion = encrypt(emp.direccion);
+        procesado = true;
+        console.log(`  ✓ Dirección cifrada`);
+      }
+
+      if (emp.encargado && !emp.encargado.includes(':')) {
+        updates.encargado = encrypt(emp.encargado);
+        procesado = true;
+        console.log(`  ✓ Encargado cifrado`);
+      }
+
+      if (emp.rut_encargado && !emp.rut_encargado.includes(':')) {
+        updates.rut_encargado = encrypt(emp.rut_encargado);
+        procesado = true;
+        console.log(`  ✓ RUT encargado cifrado`);
+      }
+
+      // 2. Cifrar logo (LA PARTE IMPORTANTE)
+      if (emp.logo && emp.logo.fileData) {
+        console.log(`  Logo encontrado: ${emp.logo.fileName}`);
+
+        // Verificar si ya está cifrado
+        if (typeof emp.logo.fileData === 'string' && emp.logo.fileData.includes(':')) {
+          console.log(`  ⚠ Logo ya cifrado, saltando`);
+          logosYaCifrados++;
+          continue;
+        }
+
+        try {
+          let base64Str;
+
+          // MANEJO DEL BINARY (igual que el endpoint PUT)
+          if (emp.logo.fileData && emp.logo.fileData.buffer) {
+            // Caso 1: Es un Binary de MongoDB con buffer
+            console.log(`  Tipo: Binary con buffer`);
+            base64Str = Buffer.from(emp.logo.fileData.buffer).toString('base64');
+          }
+          else if (emp.logo.fileData._bsontype === 'Binary') {
+            // Caso 2: Es un Binary de MongoDB (driver viejo)
+            console.log(`  Tipo: Binary (_bsontype)`);
+            base64Str = emp.logo.fileData.toString('base64');
+          }
+          else if (Buffer.isBuffer(emp.logo.fileData)) {
+            // Caso 3: Es un Buffer puro
+            console.log(`  Tipo: Buffer`);
+            base64Str = emp.logo.fileData.toString('base64');
+          }
+          else if (typeof emp.logo.fileData === 'string') {
+            // Caso 4: Ya es string Base64
+            console.log(`  Tipo: String Base64`);
+
+            // Verificar si ya es Base64 válido
+            const isBase64 = /^[A-Za-z0-9+/]+=*$/.test(emp.logo.fileData);
+            if (isBase64) {
+              base64Str = emp.logo.fileData;
+            } else {
+              console.log(`  ⚠ String no es Base64 válido, intentando convertir...`);
+              // Intentar tratar como binary string
+              base64Str = Buffer.from(emp.logo.fileData, 'binary').toString('base64');
+            }
+          }
+          else {
+            console.log(`  ❌ Tipo no reconocido:`, typeof emp.logo.fileData, emp.logo.fileData);
+            logosConError++;
+            continue;
+          }
+
+          // Verificar que tenemos Base64 válido
+          if (!base64Str || !/^[A-Za-z0-9+/]+=*$/.test(base64Str.substring(0, 100))) {
+            console.log(`  ❌ Base64 no válido generado`);
+            logosConError++;
+            continue;
+          }
+
+          console.log(`  Base64 generado, longitud: ${base64Str.length}`);
+
+          // CIFRAR (igual que el endpoint PUT)
+          const fileDataCifrado = encrypt(base64Str);
+
+          // Verificar cifrado
+          if (!fileDataCifrado || !fileDataCifrado.includes(':')) {
+            console.log(`  ❌ Cifrado falló`);
+            logosConError++;
+            continue;
+          }
+
+          updates["logo.fileData"] = fileDataCifrado;
+          logosProcesados++;
+          procesado = true;
+          console.log(`  ✓ Logo cifrado exitosamente`);
+
+        } catch (error) {
+          console.error(`  ❌ Error procesando logo:`, error.message);
+          logosConError++;
+          // No actualizar el logo si hay error
+        }
+      }
+
+      // Actualizar en BD si hay cambios
+      if (procesado && Object.keys(updates).length > 0) {
+        try {
+          await req.db.collection("empresas").updateOne(
+            { _id: emp._id },
+            { $set: updates }
+          );
+          cont++;
+          console.log(`  ✅ Empresa actualizada en BD`);
+        } catch (dbError) {
+          console.error(`  ❌ Error actualizando BD:`, dbError.message);
+        }
+      } else {
+        console.log(`  ⏭️ Sin cambios, saltando`);
+      }
     }
 
-    res.json({ message: "Empresa eliminada exitosamente" });
+    console.log(`\n=== MIGRACIÓN COMPLETADA ===`);
+
+    res.json({
+      success: true,
+      message: `Empresas migradas: ${cont}/${empresas.length}`,
+      estadisticas: {
+        totalEmpresas: empresas.length,
+        empresasProcesadas: cont,
+        logosProcesados,
+        logosConError,
+        logosYaCifrados,
+        empresasSinCambios: empresas.length - cont
+      },
+      nota: "Los logos ahora están cifrados igual que en el endpoint PUT /empresas/:id"
+    });
 
   } catch (err) {
-    console.error("Error eliminando empresa:", err);
-    res.status(500).json({ error: "Error al eliminar empresa" });
+    console.error('Error en migración V3:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      stack: err.stack
+    });
+  }
+});
+
+router.get("/mantenimiento/migrar-tokens-pqc", async (req, res) => {
+  try {
+    const tokens = await req.db.collection("tokens").find().toArray();
+    let cont = 0;
+
+    for (let tokenDoc of tokens) {
+      const updates = {};
+
+      if (tokenDoc.email && !tokenDoc.email.includes(':')) {
+        updates.email = encrypt(tokenDoc.email);
+        updates.email_index = createBlindIndex(tokenDoc.email);
+      }
+
+      if (tokenDoc.rol && !tokenDoc.rol.includes(':')) {
+        updates.rol = encrypt(tokenDoc.rol);
+      }
+
+      if (tokenDoc.active !== undefined && tokenDoc.active !== null) {
+        if (typeof tokenDoc.active === 'string' && tokenDoc.active.includes(':')) {
+          // Ya está cifrado, no hacer nada
+        }
+        else if (typeof tokenDoc.active === 'boolean') {
+          const activeStr = tokenDoc.active.toString();
+          updates.active = encrypt(activeStr);
+        }
+        else if (typeof tokenDoc.active === 'string' && !tokenDoc.active.includes(':')) {
+          updates.active = encrypt(tokenDoc.active);
+        }
+      }
+
+      if (Object.keys(updates).length > 0) {
+        await req.db.collection("tokens").updateOne({ _id: tokenDoc._id }, { $set: updates });
+        cont++;
+      }
+    }
+
+    res.json({
+      success: true,
+      message: `Tokens migrados: ${cont}/${tokens.length}`,
+      total: tokens.length,
+      migrados: cont,
+      nota: "Se añadió email_index para búsquedas por email"
+    });
+
+  } catch (err) {
+    console.error('Error migrando tokens:', err);
+    res.status(500).json({ error: err.message });
   }
 });
 
